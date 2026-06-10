@@ -15,7 +15,7 @@ pinned git tag:
 
 ```toml
 dependencies = [
-    "cw-core @ git+ssh://git@github.com/jsettypalli/cw-agent-core.git@v0.1.0",
+    "cw-core @ git+https://github.com/jsettypalli/cw-agent-core.git@v0.1.0",
 ]
 ```
 
