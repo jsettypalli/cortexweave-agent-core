@@ -6,7 +6,7 @@ _NUMBER_PATTERN = re.compile(r"\(?-?\d[\d,]*(?:\.\d+)?\)?")
 
 def extract_mutual_fund_values(text: str) -> dict:
     text = text.strip()
-    units_cost = re.match(r"^(?P<units>\d[\d,]*\.\d{3})(?P<cost>\(?\d{1,3}(?:,\d{2})+,\d{3}\)?|0)", text)
+    units_cost = re.match(r"^(?P<units>\d[\d,]*\.\d{3})\s*(?P<cost>\(?\d{1,3}(?:,\d{2})+,\d{3}\)?|0)", text)
     if not units_cost:
         return {}
     values = {"units": _parse_decimal(units_cost.group("units")), "cost": _parse_decimal(units_cost.group("cost"))}
