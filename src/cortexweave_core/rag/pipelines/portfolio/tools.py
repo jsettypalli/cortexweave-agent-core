@@ -191,6 +191,7 @@ async def get_mutual_fund_holdings(
             "highest_gain" for highest absolute gain. Use "holding_period_months",
             "held_longest", or "longest_held" for longest-held funds. Use
             "held_shortest" or "shortest_held" for shortest-held funds. Use
+            "xirr_percent" or "highest_xirr" for XIRR ranking. Use
             "gain_loss_percent" only for percentage-return ranking.
         limit: Optional maximum number of rows to return after filtering/sorting.
 
@@ -213,6 +214,8 @@ async def get_mutual_fund_holdings(
     normalized_sort = _normalize_text(sort_by)
     if normalized_sort in {"highest gain", "total gain", "total returns", "gain"}:
         filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "total_gain"), reverse=True)
+    elif normalized_sort in {"xirr percent", "xirr", "highest xirr", "best xirr", "highest return", "best return"}:
+        filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "xirr_percent"), reverse=True)
     elif normalized_sort in {"gain loss percent", "gain percent", "return percent", "percentage gain"}:
         filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "gain_loss_percent"), reverse=True)
     elif normalized_sort in {"holding period months", "holding period", "held longest", "longest held", "longest", "held"}:
