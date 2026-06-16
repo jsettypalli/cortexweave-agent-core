@@ -82,6 +82,13 @@ def _numeric_sort_value(row: dict, key: str) -> float:
     return float(value)
 
 
+def _sort_rows(rows: list[dict], key: str, *, reverse: bool = True) -> None:
+    populated = [row for row in rows if row.get(key) is not None]
+    missing = [row for row in rows if row.get(key) is None]
+    populated.sort(key=lambda row: float(row.get(key)), reverse=reverse)
+    rows[:] = [*populated, *missing]
+
+
 def _top_total_gain_by_holder_asset_class(rows: list[dict]) -> list[dict]:
     top_rows: dict[tuple[str, str], dict] = {}
     for row in rows:
@@ -191,7 +198,8 @@ async def get_mutual_fund_holdings(
             "highest_gain" for highest absolute gain. Use "holding_period_months",
             "held_longest", or "longest_held" for longest-held funds. Use
             "held_shortest" or "shortest_held" for shortest-held funds. Use
-            "xirr_percent" or "highest_xirr" for XIRR ranking. Use
+            "xirr_percent" or "highest_xirr" for highest XIRR ranking, and
+            "lowest_xirr" or "worst_xirr" for lowest XIRR ranking. Use
             "gain_loss_percent" only for percentage-return ranking.
         limit: Optional maximum number of rows to return after filtering/sorting.
 
@@ -213,15 +221,17 @@ async def get_mutual_fund_holdings(
 
     normalized_sort = _normalize_text(sort_by)
     if normalized_sort in {"highest gain", "total gain", "total returns", "gain"}:
-        filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "total_gain"), reverse=True)
+        _sort_rows(filtered_rows, "total_gain", reverse=True)
     elif normalized_sort in {"xirr percent", "xirr", "highest xirr", "best xirr", "highest return", "best return"}:
-        filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "xirr_percent"), reverse=True)
+        _sort_rows(filtered_rows, "xirr_percent", reverse=True)
+    elif normalized_sort in {"lowest xirr", "worst xirr", "lowest return", "worst return"}:
+        _sort_rows(filtered_rows, "xirr_percent", reverse=False)
     elif normalized_sort in {"gain loss percent", "gain percent", "return percent", "percentage gain"}:
-        filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "gain_loss_percent"), reverse=True)
+        _sort_rows(filtered_rows, "gain_loss_percent", reverse=True)
     elif normalized_sort in {"holding period months", "holding period", "held longest", "longest held", "longest", "held"}:
-        filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "holding_period_months"), reverse=True)
+        _sort_rows(filtered_rows, "holding_period_months", reverse=True)
     elif normalized_sort in {"held shortest", "shortest held", "shortest", "held least", "least held"}:
-        filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "holding_period_months"))
+        _sort_rows(filtered_rows, "holding_period_months", reverse=False)
 
     if limit is not None and limit > 0:
         filtered_rows = filtered_rows[:limit]
