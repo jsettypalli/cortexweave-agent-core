@@ -109,6 +109,29 @@ def _top_total_gain_by_holder_asset_class(rows: list[dict]) -> list[dict]:
     ]
 
 
+def _top_by_holder(rows: list[dict], field: str, output_field: str) -> list[dict]:
+    top_rows: dict[str, dict] = {}
+    for row in rows:
+        holder_name = row.get("holder_name") or ""
+        current = top_rows.get(holder_name)
+        if current is None or _numeric_sort_value(row, field) > _numeric_sort_value(current, field):
+            top_rows[holder_name] = row
+
+    return [
+        {
+            "holder_name": row.get("holder_name"),
+            "asset_class": row.get("asset_class"),
+            "scheme_name": row.get("scheme_name"),
+            "sub_asset_class": row.get("sub_asset_class"),
+            output_field: row.get(field),
+            "total_gain": row.get("total_gain"),
+            "gain_loss_percent": row.get("gain_loss_percent"),
+            "market_value": row.get("market_value"),
+        }
+        for row in sorted(top_rows.values(), key=lambda item: item.get("holder_name") or "")
+    ]
+
+
 async def get_asset_allocation() -> dict:
     """
     Returns the family-level asset allocation (e.g. Equity, Debt, Cash) across all
@@ -165,14 +188,16 @@ async def get_mutual_fund_holdings(
         sub_asset_class: Optional exact sub-asset-class filter, such as
             "Large Cap", "Flexi Cap", or "Mid Cap".
         sort_by: Optional ranking field. Use "total_gain", "total_returns", or
-            "highest_gain" for highest absolute gain. Use "gain_loss_percent"
-            only for percentage-return ranking.
+            "highest_gain" for highest absolute gain. Use "holding_period_months",
+            "held_longest", or "longest_held" for longest-held funds. Use
+            "gain_loss_percent" only for percentage-return ranking.
         limit: Optional maximum number of rows to return after filtering/sorting.
 
     Returns:
         dict with "rows" (one per scheme per holder), "totals", applied
-        "filters", and "top_total_gain_by_holder_asset_class" to support
-        holder-specific highest-gain questions.
+        "filters", "top_total_gain_by_holder_asset_class", and
+        "top_holding_period_by_holder" to support holder-specific ranking
+        questions.
     """
     result = await asyncio.to_thread(_run, analytics.mutual_fund_holdings)
     rows = list(result.get("rows") or [])
@@ -189,6 +214,10 @@ async def get_mutual_fund_holdings(
         filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "total_gain"), reverse=True)
     elif normalized_sort in {"gain loss percent", "gain percent", "return percent", "percentage gain"}:
         filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "gain_loss_percent"), reverse=True)
+    elif normalized_sort in {"holding period months", "holding period", "held longest", "longest held", "longest", "held"}:
+        filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "holding_period_months"), reverse=True)
+    elif normalized_sort in {"held shortest", "shortest held", "shortest"}:
+        filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "holding_period_months"))
 
     if limit is not None and limit > 0:
         filtered_rows = filtered_rows[:limit]
@@ -202,6 +231,7 @@ async def get_mutual_fund_holdings(
             "limit": limit,
         },
         "top_total_gain_by_holder_asset_class": _top_total_gain_by_holder_asset_class(rows),
+        "top_holding_period_by_holder": _top_by_holder(rows, "holding_period_months", "holding_period_months"),
         "rows": filtered_rows,
         "totals": result.get("totals"),
     }
