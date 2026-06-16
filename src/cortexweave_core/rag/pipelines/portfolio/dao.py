@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from cortexweave_core.rag.pipelines.portfolio.models import PortfolioFamily, PortfolioReport
 
@@ -18,6 +18,12 @@ class PortfolioReportDAO:
         ).order_by(PortfolioReport.report_date.desc()).limit(1).scalar()
         if not latest_date:
             return []
-        return session.query(PortfolioReport).filter_by(
+        return session.query(PortfolioReport).options(
+            selectinload(PortfolioReport.asset_allocations),
+            selectinload(PortfolioReport.sub_asset_allocations),
+            selectinload(PortfolioReport.mutual_fund_holdings),
+            selectinload(PortfolioReport.pms_holdings),
+            selectinload(PortfolioReport.bond_holdings),
+        ).filter_by(
             portfolio_family_id=family.id, report_date=latest_date, is_active=True,
         ).all()

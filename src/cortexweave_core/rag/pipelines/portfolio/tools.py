@@ -46,6 +46,69 @@ def _run(analytics_fn: Callable[[list[PortfolioReport]], dict]) -> dict:
     return analytics_fn(reports)
 
 
+def _normalize_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return " ".join(
+        token
+        for token in "".join(
+            char.lower() if char.isalnum() else " "
+            for char in value
+        ).split()
+        if token not in {"mr", "mrs", "ms", "shri", "smt"}
+    )
+
+
+def _matches_holder(row_holder_name: str | None, requested_holder_name: str | None) -> bool:
+    requested = _normalize_text(requested_holder_name)
+    if not requested:
+        return True
+    holder = _normalize_text(row_holder_name)
+    requested_tokens = requested.split()
+    return all(token in holder.split() for token in requested_tokens)
+
+
+def _matches_text(row_value: str | None, requested_value: str | None) -> bool:
+    requested = _normalize_text(requested_value)
+    if not requested:
+        return True
+    return _normalize_text(row_value) == requested
+
+
+def _numeric_sort_value(row: dict, key: str) -> float:
+    value = row.get(key)
+    if value is None:
+        return float("-inf")
+    return float(value)
+
+
+def _top_total_gain_by_holder_asset_class(rows: list[dict]) -> list[dict]:
+    top_rows: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        holder_name = row.get("holder_name") or ""
+        asset_class = row.get("asset_class") or ""
+        key = (holder_name, asset_class)
+        current = top_rows.get(key)
+        if current is None or _numeric_sort_value(row, "total_gain") > _numeric_sort_value(current, "total_gain"):
+            top_rows[key] = row
+
+    return [
+        {
+            "holder_name": row.get("holder_name"),
+            "asset_class": row.get("asset_class"),
+            "scheme_name": row.get("scheme_name"),
+            "sub_asset_class": row.get("sub_asset_class"),
+            "total_gain": row.get("total_gain"),
+            "gain_loss_percent": row.get("gain_loss_percent"),
+            "market_value": row.get("market_value"),
+        }
+        for row in sorted(
+            top_rows.values(),
+            key=lambda item: ((item.get("holder_name") or ""), (item.get("asset_class") or "")),
+        )
+    ]
+
+
 async def get_asset_allocation() -> dict:
     """
     Returns the family-level asset allocation (e.g. Equity, Debt, Cash) across all
@@ -82,16 +145,66 @@ async def get_sub_asset_allocation() -> dict:
     return await asyncio.to_thread(_run, analytics.family_sub_asset_allocation)
 
 
-async def get_mutual_fund_holdings() -> dict:
+async def get_mutual_fund_holdings(
+    holder_name: str | None = None,
+    asset_class: str | None = None,
+    sub_asset_class: str | None = None,
+    sort_by: str | None = None,
+    limit: int | None = None,
+) -> dict:
     """
     Returns individual mutual fund scheme holdings across all holders in the
     configured portfolio family's latest reports, including units, cost, market
     value, XIRR, gain/loss % and holding period.
 
+    Args:
+        holder_name: Optional holder filter. For example, "Sulemanji Roowala"
+            matches report holder "SULEMANJI M ROOWALA".
+        asset_class: Optional exact broad asset class filter, such as "Equity",
+            "Debt/Fixed Income", "Hybrid", or "Cash/Cash Equivalents".
+        sub_asset_class: Optional exact sub-asset-class filter, such as
+            "Large Cap", "Flexi Cap", or "Mid Cap".
+        sort_by: Optional ranking field. Use "total_gain", "total_returns", or
+            "highest_gain" for highest absolute gain. Use "gain_loss_percent"
+            only for percentage-return ranking.
+        limit: Optional maximum number of rows to return after filtering/sorting.
+
     Returns:
-        dict with "rows" (one per scheme per holder) and "totals".
+        dict with "rows" (one per scheme per holder), "totals", applied
+        "filters", and "top_total_gain_by_holder_asset_class" to support
+        holder-specific highest-gain questions.
     """
-    return await asyncio.to_thread(_run, analytics.mutual_fund_holdings)
+    result = await asyncio.to_thread(_run, analytics.mutual_fund_holdings)
+    rows = list(result.get("rows") or [])
+
+    filtered_rows = [
+        row for row in rows
+        if _matches_holder(row.get("holder_name"), holder_name)
+        and _matches_text(row.get("asset_class"), asset_class)
+        and _matches_text(row.get("sub_asset_class"), sub_asset_class)
+    ]
+
+    normalized_sort = _normalize_text(sort_by)
+    if normalized_sort in {"highest gain", "total gain", "total returns", "gain"}:
+        filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "total_gain"), reverse=True)
+    elif normalized_sort in {"gain loss percent", "gain percent", "return percent", "percentage gain"}:
+        filtered_rows.sort(key=lambda row: _numeric_sort_value(row, "gain_loss_percent"), reverse=True)
+
+    if limit is not None and limit > 0:
+        filtered_rows = filtered_rows[:limit]
+
+    return {
+        "filters": {
+            "holder_name": holder_name,
+            "asset_class": asset_class,
+            "sub_asset_class": sub_asset_class,
+            "sort_by": sort_by,
+            "limit": limit,
+        },
+        "top_total_gain_by_holder_asset_class": _top_total_gain_by_holder_asset_class(rows),
+        "rows": filtered_rows,
+        "totals": result.get("totals"),
+    }
 
 
 async def get_holder_returns() -> dict:
