@@ -134,11 +134,26 @@ def _structured_fallback_answer(question: str, data: dict) -> str:
             direction = "lowest" if sort.get("direction") == "asc" else "highest"
             if name and field:
                 return f"The {direction} matching result is {name} with {field} {value}."
+        total_answer = _metric_total_answer(dataset, metrics)
+        if total_answer:
+            return total_answer
         metric_answer = _metric_lookup_answer(rows[0], metrics, dataset_name)
         if metric_answer:
             return metric_answer
         return f"Found {len(rows)} matching portfolio row(s) for: {question}"
     return "I don't have enough structured portfolio information to answer the question."
+
+
+def _metric_total_answer(dataset: dict[str, Any], metrics: list[str]) -> str | None:
+    rows = dataset.get("rows") or []
+    if len(rows) <= 1:
+        return None
+    totals = dataset.get("totals") or {}
+    for metric in metrics:
+        value = totals.get(metric)
+        if value is not None:
+            return f"total {metric} is {value}."
+    return None
 
 
 def _metric_lookup_answer(

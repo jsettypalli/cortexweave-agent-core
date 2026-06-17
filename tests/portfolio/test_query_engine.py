@@ -354,3 +354,47 @@ def test_purchase_price_question_routes_to_exact_mutual_fund_holding():
         result["datasets"]["mutual_fund_holdings"]["rows"][0]["purchase_price"]
         == 148.369
     )
+
+
+def test_family_total_assets_does_not_filter_to_one_roowalla_holder():
+    context = {
+        "holder_returns": {
+            "rows": [
+                {
+                    "holder_name": "SULEMANJI M ROOWALA",
+                    "current_value": 565389857.0,
+                },
+                {
+                    "holder_name": "Ms. ROOWALLA FATEMA SULEMANJI",
+                    "current_value": 77280470.0,
+                },
+            ]
+        }
+    }
+
+    plan, result = _execute("what are the total assets for the roowalla family", context)
+
+    assert plan.datasets == ["holder_returns"]
+    assert plan.filters == {}
+    assert plan.metrics[0] == "current_value"
+    assert result["datasets"]["holder_returns"]["totals"]["current_value"] == 642670327.0
+
+
+def test_structured_fallback_answer_uses_totals_for_multiple_rows():
+    answer = _structured_fallback_answer(
+        "what are the total assets for the roowalla family",
+        {
+            "plan": {"metrics": ["current_value"]},
+            "datasets": {
+                "holder_returns": {
+                    "rows": [
+                        {"holder_name": "A", "current_value": 100.0},
+                        {"holder_name": "B", "current_value": 50.0},
+                    ],
+                    "totals": {"current_value": 150.0},
+                }
+            },
+        },
+    )
+
+    assert answer == "total current_value is 150.0."

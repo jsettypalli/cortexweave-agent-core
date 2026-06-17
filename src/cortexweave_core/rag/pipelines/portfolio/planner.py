@@ -130,6 +130,11 @@ def build_portfolio_query_plan(question: str, schema: dict[str, Any]) -> Portfol
         filters.pop("holder_name", None)
         datasets = ["holder_returns"]
         group_by = []
+    if _asks_for_family_total_assets(normalized):
+        filters.pop("holder_name", None)
+        datasets = ["holder_returns"]
+        group_by = []
+        metrics = _dedupe(["current_value", *metrics])
 
     has_fund_holdings = bool(schema.get("mutual_fund_schemes"))
     asks_for_fund_holdings = any(term in normalized for term in ("fund name", "fund names", "scheme", "schemes", "mutual fund", "mutual funds"))
@@ -523,6 +528,17 @@ def _asks_for_holder_ranking(normalized: str) -> bool:
         any(term in normalized for term in holder_terms)
         and any(term in normalized for term in ranking_terms)
         and any(term in normalized for term in metric_terms)
+    )
+
+
+def _asks_for_family_total_assets(normalized: str) -> bool:
+    family_terms = ("family", "household", "overall", "total assets", "net worth")
+    total_terms = ("total", "overall", "aggregate", "combined")
+    asset_terms = ("asset", "assets", "portfolio value", "net worth", "current value")
+    return (
+        any(term in normalized for term in family_terms)
+        and any(term in normalized for term in total_terms)
+        and any(term in normalized for term in asset_terms)
     )
 
 
