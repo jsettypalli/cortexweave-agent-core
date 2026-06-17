@@ -92,6 +92,7 @@ def _structured_fallback_answer(question: str, data: dict) -> str:
     plan = data.get("plan", {})
     sort = plan.get("sort") or {}
     group_by = plan.get("group_by") or []
+    metrics = plan.get("metrics") or []
     datasets = data.get("datasets", {})
     for dataset_name, dataset in datasets.items():
         rows = dataset.get("rows") or []
@@ -133,5 +134,38 @@ def _structured_fallback_answer(question: str, data: dict) -> str:
             direction = "lowest" if sort.get("direction") == "asc" else "highest"
             if name and field:
                 return f"The {direction} matching result is {name} with {field} {value}."
+        metric_answer = _metric_lookup_answer(rows[0], metrics, dataset_name)
+        if metric_answer:
+            return metric_answer
         return f"Found {len(rows)} matching portfolio row(s) for: {question}"
     return "I don't have enough structured portfolio information to answer the question."
+
+
+def _metric_lookup_answer(
+    row: dict[str, Any],
+    metrics: list[str],
+    dataset_name: str,
+) -> str | None:
+    for metric in metrics:
+        if metric not in row:
+            continue
+        value = row.get(metric)
+        if value is None:
+            continue
+        name = _row_display_name(row, dataset_name)
+        if name:
+            return f"{metric} for {name} is {value}."
+        return f"{metric} is {value}."
+    return None
+
+
+def _row_display_name(row: dict[str, Any], dataset_name: str) -> str | None:
+    if dataset_name == "holder_returns":
+        return row.get("holder_name")
+    return (
+        row.get("scheme_name")
+        or row.get("security_name")
+        or row.get("sub_asset_class")
+        or row.get("asset_class")
+        or row.get("holder_name")
+    )

@@ -258,3 +258,99 @@ def test_structured_fallback_answer_uses_holder_name_for_holder_returns():
         answer
         == "The highest matching result is SULEMANJI M ROOWALA with total_gain 248155010.0."
     )
+
+
+def test_nav_question_routes_to_exact_mutual_fund_holding():
+    context = {
+        "sub_asset_allocations": {
+            "rows": [
+                {
+                    "holder_name": "SULEMANJI M ROOWALA",
+                    "sub_asset_class": "Flexi Cap",
+                    "current_value": 8910823.0,
+                }
+            ]
+        },
+        "mutual_fund_holdings": {
+            "rows": [
+                {
+                    "holder_name": "SULEMANJI M ROOWALA",
+                    "scheme_name": "Canara Robeco Flexi Cap Reg-G",
+                    "sub_asset_class": "Flexi Cap",
+                    "nav": 301.28,
+                }
+            ]
+        },
+    }
+
+    plan, result = _execute(
+        "What is the NAV for Canara Robeco Flexi Cap Reg-G for Sulemanji?",
+        context,
+    )
+
+    assert plan.datasets == ["mutual_fund_holdings"]
+    assert plan.filters == {
+        "holder_name": "SULEMANJI M ROOWALA",
+        "sub_asset_class": "Flexi Cap",
+        "scheme_name": "Canara Robeco Flexi Cap Reg-G",
+    }
+    assert plan.metrics == ["nav"]
+    assert result["datasets"]["mutual_fund_holdings"]["rows"][0]["nav"] == 301.28
+
+
+def test_structured_fallback_answer_reports_requested_nav_metric():
+    answer = _structured_fallback_answer(
+        "What is the NAV?",
+        {
+            "plan": {"metrics": ["nav"]},
+            "datasets": {
+                "mutual_fund_holdings": {
+                    "rows": [
+                        {
+                            "scheme_name": "Canara Robeco Flexi Cap Reg-G",
+                            "nav": 301.28,
+                        }
+                    ]
+                }
+            },
+        },
+    )
+
+    assert answer == "nav for Canara Robeco Flexi Cap Reg-G is 301.28."
+
+
+def test_purchase_price_question_routes_to_exact_mutual_fund_holding():
+    context = {
+        "sub_asset_allocations": {
+            "rows": [
+                {
+                    "holder_name": "SULEMANJI M ROOWALA",
+                    "sub_asset_class": "Flexi Cap",
+                    "current_value": 8910823.0,
+                }
+            ]
+        },
+        "mutual_fund_holdings": {
+            "rows": [
+                {
+                    "holder_name": "SULEMANJI M ROOWALA",
+                    "scheme_name": "Canara Robeco Flexi Cap Reg-G",
+                    "sub_asset_class": "Flexi Cap",
+                    "purchase_price": 148.369,
+                }
+            ]
+        },
+    }
+
+    plan, result = _execute(
+        "What is the purchase price for Canara Robeco Flexi Cap Reg-G for Sulemanji?",
+        context,
+    )
+
+    assert plan.datasets == ["mutual_fund_holdings"]
+    assert plan.filters["scheme_name"] == "Canara Robeco Flexi Cap Reg-G"
+    assert plan.metrics == ["purchase_price"]
+    assert (
+        result["datasets"]["mutual_fund_holdings"]["rows"][0]["purchase_price"]
+        == 148.369
+    )

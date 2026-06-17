@@ -58,6 +58,8 @@ METRIC_ALIASES = {
     "unrealized_gain_loss": ("unrealized", "unrealised"),
     "dividend_interest_paid": ("dividend", "interest paid", "interest"),
     "holding_period_months": ("holding period", "held", "longest", "months"),
+    "nav": ("nav", "net asset value"),
+    "purchase_price": ("purchase price", "purchase nav"),
 }
 
 EXTERNAL_METADATA_TERMS = (
@@ -132,6 +134,7 @@ def build_portfolio_query_plan(question: str, schema: dict[str, Any]) -> Portfol
     has_fund_holdings = bool(schema.get("mutual_fund_schemes"))
     asks_for_fund_holdings = any(term in normalized for term in ("fund name", "fund names", "scheme", "schemes", "mutual fund", "mutual funds"))
     asks_for_funds = asks_for_fund_holdings or "fund" in _tokens(normalized) or "funds" in _tokens(normalized)
+    asks_for_funds = asks_for_funds or bool(filters.get("scheme_name"))
     if not (has_fund_holdings and asks_for_funds):
         datasets = [dataset for dataset in datasets if dataset != "mutual_fund_holdings"]
     if has_fund_holdings and asks_for_funds:
@@ -142,6 +145,8 @@ def build_portfolio_query_plan(question: str, schema: dict[str, Any]) -> Portfol
         datasets.insert(0, "sub_asset_allocations")
     if filters.get("sub_asset_class") and "mutual_fund_holdings" not in datasets:
         datasets = [dataset for dataset in datasets if dataset != "asset_allocations"]
+    if filters.get("scheme_name") and "mutual_fund_holdings" not in datasets:
+        datasets.insert(0, "mutual_fund_holdings")
     if filters.get("asset_bucket") and not datasets:
         datasets.append("asset_allocations")
     if filters.get("asset_class") and not datasets:
@@ -389,6 +394,8 @@ def _infer_datasets(normalized: str, filters: dict[str, str]) -> list[str]:
         datasets.append("asset_allocations")
     if "holder_name" in filters and any(term in normalized for term in ("return", "xirr", "gain", "performance")):
         datasets.append("holder_returns")
+    if filters.get("scheme_name"):
+        datasets.append("mutual_fund_holdings")
     return _dedupe(datasets)
 
 
@@ -592,7 +599,7 @@ def _exact_dimension_matches(normalized: str, values: list[str], dimension_key: 
 
 def _should_match_holding_dimension(normalized: str, dimension_key: str) -> bool:
     if dimension_key == "scheme_name":
-        return any(term in normalized for term in ("scheme", "fund", "pms", "holding"))
+        return any(term in normalized for term in ("scheme", "fund", "pms", "holding", "nav", "purchase price", "purchase nav", "folio", "units"))
     if dimension_key == "security_name":
         return any(term in normalized for term in ("security", "bond", "fd", "fixed deposit", "holding"))
     return True

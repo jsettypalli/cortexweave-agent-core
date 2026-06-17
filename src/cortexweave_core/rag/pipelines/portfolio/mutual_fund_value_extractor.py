@@ -92,7 +92,7 @@ def _split_fused_percent_and_price(tokens):
         return tokens
     fused_percent = tokens[5]
     next_token = tokens[6]
-    match = re.fullmatch(r"(-?\d+\.\d{2})(\d{2})", fused_percent)
+    match = re.fullmatch(r"(-?\d+\.\d{2})(\d{2,3})", fused_percent)
     if not match or not re.fullmatch(r"\d{3}", next_token):
         return tokens
     return [*tokens[:5], match.group(1), f"{match.group(2)}.{next_token}", *tokens[7:]]
