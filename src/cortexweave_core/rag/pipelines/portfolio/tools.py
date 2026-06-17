@@ -6,6 +6,9 @@ from cortexweave_core.rag.pipelines.documents.dao import KnowledgeBaseDAO
 from cortexweave_core.rag.pipelines.portfolio import analytics
 from cortexweave_core.rag.pipelines.portfolio.dao import PortfolioReportDAO
 from cortexweave_core.rag.pipelines.portfolio.models import PortfolioReport
+from cortexweave_core.rag.pipelines.portfolio.query_engine import (
+    answer_portfolio_query as _answer_portfolio_query,
+)
 from cortexweave_core.utils.config_loader import config
 
 
@@ -44,6 +47,17 @@ def _run(analytics_fn: Callable[[list[PortfolioReport]], dict]) -> dict:
     if not reports:
         return _not_found(knowledge_base_name, family_id)
     return analytics_fn(reports)
+
+
+async def answer_portfolio_query(question: str) -> dict:
+    """
+    Answers portfolio questions using the deterministic portfolio query engine.
+
+    Use this as the primary portfolio tool. Pass the user's full portfolio
+    question; the query engine handles planning, filtering, sorting, grouping,
+    and ranking.
+    """
+    return await _answer_portfolio_query(question)
 
 
 def _normalize_text(value: str | None) -> str:
