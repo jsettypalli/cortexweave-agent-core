@@ -140,6 +140,9 @@ def _structured_fallback_answer(question: str, data: dict) -> str:
         total_answer = _metric_total_answer(dataset, metrics)
         if total_answer:
             return total_answer
+        average_answer = _average_metric_answer(question, rows, metrics)
+        if average_answer:
+            return average_answer
         metric_answer = _metric_lookup_answer(rows[0], metrics, dataset_name)
         if metric_answer:
             return metric_answer
@@ -195,6 +198,57 @@ def _metric_total_answer(dataset: dict[str, Any], metrics: list[str]) -> str | N
         if value is not None:
             return f"total {metric} is {value}."
     return None
+
+
+def _average_metric_answer(
+    question: str,
+    rows: list[dict[str, Any]],
+    metrics: list[str],
+) -> str | None:
+    normalized = question.lower()
+    if not any(term in normalized for term in ("average", "avg", "mean")):
+        return None
+
+    for metric in metrics:
+        if metric == "xirr_percent":
+            reported = _reported_xirr_answer(rows)
+            if reported:
+                return reported
+        values = [
+            row.get(metric)
+            for row in rows
+            if isinstance(row.get(metric), (int, float))
+        ]
+        if not values:
+            continue
+        average = round(sum(values) / len(values), 2)
+        suffix = "%" if metric.endswith("_percent") else ""
+        return f"Average {metric} across {len(values)} matching rows is {average}{suffix}."
+    return None
+
+
+def _reported_xirr_answer(rows: list[dict[str, Any]]) -> str | None:
+    reported_rows = [
+        row
+        for row in rows
+        if isinstance(row.get("xirr_percent"), (int, float))
+        and row.get("asset_class")
+        and not row.get("scheme_name")
+        and not row.get("security_name")
+    ]
+    if len(reported_rows) != 1:
+        return None
+
+    row = reported_rows[0]
+    parts = []
+    holder = row.get("holder_name")
+    asset_class = row.get("asset_class")
+    if holder:
+        parts.append(str(holder))
+    if asset_class:
+        parts.append(str(asset_class))
+    label = " for " + " / ".join(parts) if parts else ""
+    return f"PDF-reported XIRR{label} is {row['xirr_percent']}%."
 
 
 def _metric_lookup_answer(

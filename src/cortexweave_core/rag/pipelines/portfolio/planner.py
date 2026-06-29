@@ -136,13 +136,23 @@ def build_portfolio_query_plan(question: str, schema: dict[str, Any]) -> Portfol
         group_by = []
         metrics = _dedupe(["current_value", *metrics])
 
+    if _asks_for_reported_average_xirr(normalized) and (
+        filters.get("asset_bucket") or filters.get("asset_class")
+    ):
+        datasets = ["asset_allocations"]
+        metrics = ["xirr_percent"]
+
     has_fund_holdings = bool(schema.get("mutual_fund_schemes"))
     asks_for_fund_holdings = any(term in normalized for term in ("fund name", "fund names", "scheme", "schemes", "mutual fund", "mutual funds"))
     asks_for_funds = asks_for_fund_holdings or "fund" in _tokens(normalized) or "funds" in _tokens(normalized)
     asks_for_funds = asks_for_funds or bool(filters.get("scheme_name"))
     if not (has_fund_holdings and asks_for_funds):
         datasets = [dataset for dataset in datasets if dataset != "mutual_fund_holdings"]
-    if has_fund_holdings and asks_for_funds:
+    if (
+        has_fund_holdings
+        and asks_for_funds
+        and not _asks_for_reported_average_xirr(normalized)
+    ):
         datasets = [dataset for dataset in datasets if dataset not in {"holder_returns", "asset_allocations", "sub_asset_allocations"}]
         if "mutual_fund_holdings" not in datasets:
             datasets.insert(0, "mutual_fund_holdings")
@@ -342,7 +352,9 @@ def _repair_model_plan_for_question(
     normalized = _normalize(question)
     has_fund_holdings = bool(schema.get("mutual_fund_schemes"))
     asks_for_funds = any(term in normalized for term in ("fund", "funds", "scheme", "schemes", "mutual fund", "mutual funds"))
-    if has_fund_holdings and asks_for_funds:
+    if _asks_for_reported_average_xirr(normalized) and (filters.get("asset_bucket") or filters.get("asset_class")):
+        datasets = ["asset_allocations"]
+    elif has_fund_holdings and asks_for_funds:
         datasets = [dataset for dataset in datasets if dataset not in {"holder_returns", "asset_allocations", "sub_asset_allocations"}]
         if "mutual_fund_holdings" not in datasets:
             datasets.insert(0, "mutual_fund_holdings")
@@ -402,6 +414,13 @@ def _infer_datasets(normalized: str, filters: dict[str, str]) -> list[str]:
     if filters.get("scheme_name"):
         datasets.append("mutual_fund_holdings")
     return _dedupe(datasets)
+
+
+def _asks_for_reported_average_xirr(normalized: str) -> bool:
+    return (
+        any(term in normalized for term in ("average", "avg", "mean"))
+        and any(term in normalized for term in ("xirr", "return", "returns", "performance"))
+    )
 
 
 def _infer_filters(normalized: str, schema: dict[str, Any]) -> dict[str, str | list[str]]:

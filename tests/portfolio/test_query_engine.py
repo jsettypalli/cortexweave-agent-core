@@ -435,6 +435,64 @@ def test_debt_to_equity_ratio_uses_asset_buckets_not_conflicting_filters():
     )
 
 
+def test_average_xirr_for_equity_funds_uses_reported_allocation_xirr():
+    context = {
+        "asset_allocations": {
+            "rows": [
+                {
+                    "asset_class": "Equity",
+                    "asset_bucket": "Equity",
+                    "xirr_percent": 10.97,
+                    "current_value": 35524938.0,
+                },
+                {
+                    "asset_class": "Debt/Fixed Income",
+                    "asset_bucket": "Debt",
+                    "xirr_percent": 6.85,
+                    "current_value": 367935932.0,
+                },
+            ]
+        },
+        "mutual_fund_holdings": {
+            "rows": [
+                {
+                    "scheme_name": "Equity Fund A",
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "xirr_percent": 8.0,
+                },
+                {
+                    "scheme_name": "Equity Fund B",
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "xirr_percent": 12.0,
+                },
+                {
+                    "scheme_name": "Debt Fund",
+                    "asset_bucket": "Debt",
+                    "asset_class": "Debt/Fixed Income",
+                    "xirr_percent": 6.0,
+                },
+            ]
+        }
+    }
+
+    plan, result = _execute(
+        "What is the average XIRR return for my equity funds?",
+        context,
+    )
+    answer = _structured_fallback_answer(
+        "What is the average XIRR return for my equity funds?",
+        result,
+    )
+
+    assert plan.datasets == ["asset_allocations"]
+    assert plan.filters == {"asset_bucket": "Equity", "asset_class": "Equity"}
+    assert plan.metrics == ["xirr_percent"]
+    assert result["datasets"]["asset_allocations"]["matched_rows"] == 1
+    assert answer == "PDF-reported XIRR for Equity is 10.97%."
+
+
 def test_structured_fallback_answer_uses_totals_for_multiple_rows():
     answer = _structured_fallback_answer(
         "what are the total assets for the roowalla family",
