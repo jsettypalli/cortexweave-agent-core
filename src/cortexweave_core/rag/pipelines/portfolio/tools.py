@@ -53,9 +53,10 @@ async def answer_portfolio_query(question: str) -> dict:
     """
     Answers portfolio questions using the deterministic portfolio query engine.
 
-    Use this as the primary portfolio tool. Pass the user's full portfolio
-    question; the query engine handles planning, filtering, sorting, grouping,
-    and ranking.
+    Use this as the primary portfolio tool. Pass the latest user portfolio
+    question exactly as written. Do not rewrite it or add holder/family qualifiers
+    from chat history; the query engine handles planning, filtering, sorting,
+    grouping, and ranking.
     """
     return await _answer_portfolio_query(question)
 

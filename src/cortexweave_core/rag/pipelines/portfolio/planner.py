@@ -505,7 +505,7 @@ def _asks_for_broad_asset_bucket_distribution(normalized: str) -> bool:
     return (
         "debt" in normalized
         and "equity" in normalized
-        and any(term in normalized for term in ("distribution", "between", "split", "allocation", "mix", "breakdown"))
+        and any(term in normalized for term in ("distribution", "between", "split", "allocation", "mix", "breakdown", "ratio"))
     )
 
 

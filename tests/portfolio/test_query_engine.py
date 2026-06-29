@@ -384,6 +384,57 @@ def test_family_total_assets_does_not_filter_to_one_roowalla_holder():
         assert result["datasets"]["holder_returns"]["totals"]["current_value"] == 642670327.0
 
 
+def test_debt_to_equity_ratio_uses_asset_buckets_not_conflicting_filters():
+    context = {
+        "asset_allocations": {
+            "rows": [
+                {
+                    "asset_bucket": "Debt",
+                    "asset_class": "Debt/Fixed Income",
+                    "current_value": 300.0,
+                },
+                {
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "current_value": 100.0,
+                },
+            ],
+            "holder_rows": [
+                {
+                    "holder_name": "Holder A",
+                    "asset_bucket": "Debt",
+                    "asset_class": "Debt/Fixed Income",
+                    "current_value": 200.0,
+                },
+                {
+                    "holder_name": "Holder A",
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "current_value": 50.0,
+                },
+            ],
+        }
+    }
+
+    plan, result = _execute(
+        "What is the debt to equity ratio in terms of percentage?",
+        context,
+    )
+    answer = _structured_fallback_answer(
+        "What is the debt to equity ratio in terms of percentage?",
+        result,
+    )
+
+    assert plan.datasets == ["asset_allocations"]
+    assert plan.filters == {"asset_bucket": ["Debt", "Equity"]}
+    assert plan.group_by == ["asset_bucket"]
+    assert result["datasets"]["asset_allocations"]["matched_rows"] == 2
+    assert answer == (
+        "Debt is 75.0% and Equity is 25.0% of the portfolio. "
+        "The debt-to-equity ratio is 300.0%."
+    )
+
+
 def test_structured_fallback_answer_uses_totals_for_multiple_rows():
     answer = _structured_fallback_answer(
         "what are the total assets for the roowalla family",

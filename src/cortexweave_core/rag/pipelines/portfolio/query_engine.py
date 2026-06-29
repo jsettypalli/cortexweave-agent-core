@@ -99,6 +99,9 @@ def _structured_fallback_answer(question: str, data: dict) -> str:
         if not rows:
             continue
         if group_by:
+            ratio_answer = _debt_to_equity_ratio_answer(question, rows, group_by)
+            if ratio_answer:
+                return ratio_answer
             labels = []
             for row in rows:
                 label = " / ".join(
@@ -142,6 +145,44 @@ def _structured_fallback_answer(question: str, data: dict) -> str:
             return metric_answer
         return f"Found {len(rows)} matching portfolio row(s) for: {question}"
     return "I don't have enough structured portfolio information to answer the question."
+
+
+def _debt_to_equity_ratio_answer(
+    question: str,
+    rows: list[dict[str, Any]],
+    group_by: list[str],
+) -> str | None:
+    normalized = question.lower()
+    if "debt" not in normalized or "equity" not in normalized or "ratio" not in normalized:
+        return None
+    if "asset_bucket" not in group_by:
+        return None
+
+    by_bucket = {
+        str(row.get("asset_bucket") or "").strip().lower(): row
+        for row in rows
+    }
+    debt = by_bucket.get("debt")
+    equity = by_bucket.get("equity")
+    if not debt or not equity:
+        return None
+
+    debt_value = debt.get("current_value")
+    equity_value = equity.get("current_value")
+    if not isinstance(debt_value, (int, float)) or not isinstance(equity_value, (int, float)):
+        return None
+    if equity_value == 0:
+        return None
+
+    ratio_percent = round((debt_value / equity_value) * 100, 2)
+    debt_allocation = debt.get("current_allocation_percent")
+    equity_allocation = equity.get("current_allocation_percent")
+    if isinstance(debt_allocation, (int, float)) and isinstance(equity_allocation, (int, float)):
+        return (
+            f"Debt is {debt_allocation}% and Equity is {equity_allocation}% of the portfolio. "
+            f"The debt-to-equity ratio is {ratio_percent}%."
+        )
+    return f"The debt-to-equity ratio is {ratio_percent}%."
 
 
 def _metric_total_answer(dataset: dict[str, Any], metrics: list[str]) -> str | None:

@@ -17,7 +17,7 @@ def execute_portfolio_plan(plan: PortfolioQueryPlan, context: dict[str, Any]) ->
         if not isinstance(dataset, dict):
             continue
 
-        rows = _dataset_rows(dataset)
+        rows = _dataset_rows(dataset, plan)
         rows = _filter_rows(rows, plan.filters)
         if plan.group_by:
             rows = [
@@ -46,10 +46,12 @@ def execute_portfolio_plan(plan: PortfolioQueryPlan, context: dict[str, Any]) ->
     }
 
 
-def _dataset_rows(dataset: dict[str, Any]) -> list[dict[str, Any]]:
+def _dataset_rows(dataset: dict[str, Any], plan: PortfolioQueryPlan) -> list[dict[str, Any]]:
+    if "holder_name" in plan.filters or "holder_name" in plan.group_by:
+        holder_rows = dataset.get("holder_rows")
+        if holder_rows:
+            return list(holder_rows)
     rows = list(dataset.get("rows", []))
-    if dataset.get("holder_rows"):
-        rows.extend(dataset["holder_rows"])
     return rows
 
 
