@@ -372,12 +372,16 @@ def test_family_total_assets_does_not_filter_to_one_roowalla_holder():
         }
     }
 
-    plan, result = _execute("what are the total assets for the roowalla family", context)
+    for question in (
+        "what are the total assets for the roowalla family",
+        "total networth of the roowalla family",
+    ):
+        plan, result = _execute(question, context)
 
-    assert plan.datasets == ["holder_returns"]
-    assert plan.filters == {}
-    assert plan.metrics[0] == "current_value"
-    assert result["datasets"]["holder_returns"]["totals"]["current_value"] == 642670327.0
+        assert plan.datasets == ["holder_returns"]
+        assert plan.filters == {}
+        assert plan.metrics[0] == "current_value"
+        assert result["datasets"]["holder_returns"]["totals"]["current_value"] == 642670327.0
 
 
 def test_structured_fallback_answer_uses_totals_for_multiple_rows():

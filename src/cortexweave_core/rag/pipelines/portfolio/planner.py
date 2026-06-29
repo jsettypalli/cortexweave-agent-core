@@ -47,7 +47,7 @@ DATASET_ALIASES = {
 }
 
 METRIC_ALIASES = {
-    "current_value": ("current value", "market value", "value", "worth", "exposure"),
+    "current_value": ("current value", "market value", "value", "worth", "networth", "exposure"),
     "invested_value": ("invested", "investment", "cost"),
     "xirr_percent": ("xirr", "return", "returns", "performance"),
     "current_allocation_percent": ("allocation", "allocation percent", "percentage", "%"),
@@ -532,9 +532,9 @@ def _asks_for_holder_ranking(normalized: str) -> bool:
 
 
 def _asks_for_family_total_assets(normalized: str) -> bool:
-    family_terms = ("family", "household", "overall", "total assets", "net worth")
-    total_terms = ("total", "overall", "aggregate", "combined")
-    asset_terms = ("asset", "assets", "portfolio value", "net worth", "current value")
+    family_terms = ("family", "household", "overall", "total assets", "net worth", "networth")
+    total_terms = ("total", "overall", "aggregate", "combined", "net worth", "networth")
+    asset_terms = ("asset", "assets", "portfolio value", "net worth", "networth", "current value", "worth")
     return (
         any(term in normalized for term in family_terms)
         and any(term in normalized for term in total_terms)
