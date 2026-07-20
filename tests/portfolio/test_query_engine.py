@@ -4,6 +4,8 @@ from cortexweave_core.rag.pipelines.portfolio.planner import (
     portfolio_schema_from_context,
 )
 from cortexweave_core.rag.pipelines.portfolio.query_engine import (
+    _asset_class_segregation_answer,
+    _sub_asset_parent_allocation_answer,
     _structured_fallback_answer,
 )
 
@@ -37,6 +39,138 @@ def test_highest_and_lowest_xirr_route_to_mutual_fund_holdings():
         low_result["datasets"]["mutual_fund_holdings"]["rows"][0]["scheme_name"]
         == "Low XIRR Fund"
     )
+
+
+def test_highest_xirr_with_holding_period_range_ranks_by_holder():
+    context = {
+        "mutual_fund_holdings": {
+            "rows": [
+                {
+                    "holder_name": "Holder One",
+                    "scheme_name": "One Best In Range",
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "xirr_percent": 13.8,
+                    "holding_period_months": 77,
+                },
+                {
+                    "holder_name": "Holder One",
+                    "scheme_name": "One Excluded Too Long",
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "xirr_percent": 30.0,
+                    "holding_period_months": 120,
+                },
+                {
+                    "holder_name": "Holder One",
+                    "scheme_name": "One Lower In Range",
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "xirr_percent": 12.5,
+                    "holding_period_months": 43,
+                },
+                {
+                    "holder_name": "Holder Two",
+                    "scheme_name": "Two Best In Range",
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "xirr_percent": 10.95,
+                    "holding_period_months": 28,
+                },
+                {
+                    "holder_name": "Holder Two",
+                    "scheme_name": "Two Excluded Too Short",
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "xirr_percent": 25.0,
+                    "holding_period_months": 10,
+                },
+            ]
+        }
+    }
+
+    question = (
+        "Which fund has had the highest XIRR return in Equity which is atleast "
+        "27 months and above but less than 100 months?"
+    )
+    plan, result = _execute(question, context)
+    answer = _structured_fallback_answer(question, result)
+
+    rows = result["datasets"]["mutual_fund_holdings"]["rows"]
+    assert plan.datasets == ["mutual_fund_holdings"]
+    assert plan.filters == {"asset_bucket": "Equity", "asset_class": "Equity"}
+    assert plan.numeric_filters == {"holding_period_months": {"gte": 27.0, "lt": 100.0}}
+    assert plan.group_by == ["holder_name"]
+    assert plan.sort == {"field": "xirr_percent", "direction": "desc"}
+    assert {row["scheme_name"] for row in rows} == {"One Best In Range", "Two Best In Range"}
+    assert "For Holder One, One Best In Range has the highest xirr_percent at 13.8%" in answer
+    assert "For Holder Two, Two Best In Range has the highest xirr_percent at 10.95%" in answer
+
+
+def test_lowest_xirr_with_holding_period_range_ranks_by_holder():
+    context = {
+        "mutual_fund_holdings": {
+            "rows": [
+                {
+                    "holder_name": "Holder One",
+                    "scheme_name": "One Lowest In Range",
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "xirr_percent": -9.55,
+                    "holding_period_months": 9,
+                },
+                {
+                    "holder_name": "Holder One",
+                    "scheme_name": "One Excluded Too Short",
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "xirr_percent": -20.0,
+                    "holding_period_months": 7,
+                },
+                {
+                    "holder_name": "Holder One",
+                    "scheme_name": "One Higher In Range",
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "xirr_percent": 4.1,
+                    "holding_period_months": 22,
+                },
+                {
+                    "holder_name": "Holder Two",
+                    "scheme_name": "Two Lowest In Range",
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "xirr_percent": 7.18,
+                    "holding_period_months": 26,
+                },
+                {
+                    "holder_name": "Holder Two",
+                    "scheme_name": "Two Excluded Too Long",
+                    "asset_bucket": "Equity",
+                    "asset_class": "Equity",
+                    "xirr_percent": -5.0,
+                    "holding_period_months": 120,
+                },
+            ]
+        }
+    }
+
+    question = (
+        "Which fund has had the lowest XIRR return in Equity which is atleast "
+        "8 months and above but less than 100 months?"
+    )
+    plan, result = _execute(question, context)
+    answer = _structured_fallback_answer(question, result)
+
+    rows = result["datasets"]["mutual_fund_holdings"]["rows"]
+    assert plan.datasets == ["mutual_fund_holdings"]
+    assert plan.filters == {"asset_bucket": "Equity", "asset_class": "Equity"}
+    assert plan.numeric_filters == {"holding_period_months": {"gte": 8.0, "lt": 100.0}}
+    assert plan.group_by == ["holder_name"]
+    assert plan.sort == {"field": "xirr_percent", "direction": "asc"}
+    assert {row["scheme_name"] for row in rows} == {"One Lowest In Range", "Two Lowest In Range"}
+    assert "For Holder One, One Lowest In Range has the lowest xirr_percent at -9.55%" in answer
+    assert "For Holder Two, Two Lowest In Range has the lowest xirr_percent at 7.18%" in answer
 
 
 def test_holder_specific_longest_and_shortest_held_funds():
@@ -87,6 +221,377 @@ def test_holder_specific_longest_and_shortest_held_funds():
     assert (
         short_result["datasets"]["mutual_fund_holdings"]["rows"][0]["scheme_name"]
         == "Fatema Short Fund"
+    )
+
+
+def test_longest_held_funds_individually_ranks_within_each_holder():
+    context = {
+        "mutual_fund_holdings": {
+            "rows": [
+                {
+                    "holder_name": "Holder One",
+                    "scheme_name": "One Short Fund",
+                    "holding_period_months": 10,
+                },
+                {
+                    "holder_name": "Holder One",
+                    "scheme_name": "One Long Fund",
+                    "holding_period_months": 100,
+                },
+                {
+                    "holder_name": "Holder Two",
+                    "scheme_name": "Two Short Fund",
+                    "holding_period_months": 20,
+                },
+                {
+                    "holder_name": "Holder Two",
+                    "scheme_name": "Two Long Fund",
+                    "holding_period_months": 80,
+                },
+            ]
+        }
+    }
+
+    plan, result = _execute(
+        "Which fund has been held longest for Holder One and Holder Two individually?",
+        context,
+    )
+    answer = _structured_fallback_answer(
+        "Which fund has been held longest for Holder One and Holder Two individually?",
+        result,
+    )
+
+    rows = result["datasets"]["mutual_fund_holdings"]["rows"]
+    assert plan.datasets == ["mutual_fund_holdings"]
+    assert plan.filters == {}
+    assert plan.group_by == ["holder_name"]
+    assert plan.sort == {"field": "holding_period_months", "direction": "desc"}
+    assert {row["scheme_name"] for row in rows} == {"One Long Fund", "Two Long Fund"}
+    assert answer == (
+        "For Holder One, One Long Fund has been held longest at 100 months; "
+        "For Holder Two, Two Long Fund has been held longest at 80 months."
+    )
+
+
+def test_longest_held_assets_individually_ranks_asset_rows_within_each_holder():
+    context = {
+        "asset_allocations": {
+            "rows": [],
+            "holder_rows": [
+                {
+                    "holder_name": "Holder One",
+                    "asset_class": "Equity",
+                    "holding_period_months": 20,
+                    "current_value": 100.0,
+                },
+                {
+                    "holder_name": "Holder One",
+                    "asset_class": "Debt/Fixed Income",
+                    "holding_period_months": 50,
+                    "current_value": 200.0,
+                },
+                {
+                    "holder_name": "Holder Two",
+                    "asset_class": "Equity",
+                    "holding_period_months": 70,
+                    "current_value": 300.0,
+                },
+                {
+                    "holder_name": "Holder Two",
+                    "asset_class": "Hybrid",
+                    "holding_period_months": 30,
+                    "current_value": 400.0,
+                },
+            ],
+        }
+    }
+
+    plan, result = _execute(
+        "Which asset has been held longest for Holder One and Holder Two individually?",
+        context,
+    )
+    answer = _structured_fallback_answer(
+        "Which asset has been held longest for Holder One and Holder Two individually?",
+        result,
+    )
+
+    rows = result["datasets"]["asset_allocations"]["rows"]
+    assert plan.datasets == ["asset_allocations"]
+    assert plan.filters == {}
+    assert plan.group_by == ["holder_name"]
+    assert {row["asset_class"] for row in rows} == {"Debt/Fixed Income", "Equity"}
+    assert "For Holder One, Debt/Fixed Income has been held longest at 50 months" in answer
+    assert "For Holder Two, Equity has been held longest at 70 months" in answer
+
+
+def test_asset_allocation_wise_family_and_individual_uses_allocation_rows():
+    context = {
+        "asset_allocations": {
+            "rows": [
+                {
+                    "asset_class": "Debt/Fixed Income",
+                    "asset_bucket": "Debt",
+                    "current_value": 300.0,
+                    "current_allocation_percent": 60.0,
+                },
+                {
+                    "asset_class": "Equity",
+                    "asset_bucket": "Equity",
+                    "current_value": 100.0,
+                    "current_allocation_percent": 20.0,
+                },
+                {
+                    "asset_class": "Hybrid",
+                    "asset_bucket": "Equity",
+                    "current_value": 100.0,
+                    "current_allocation_percent": 20.0,
+                },
+            ],
+        },
+        "holder_asset_allocations": {
+            "rows": [
+                {
+                    "holder_name": "Holder One",
+                    "asset_class": "Debt/Fixed Income",
+                    "asset_bucket": "Debt",
+                    "current_value": 200.0,
+                    "current_allocation_percent": 80.0,
+                },
+                {
+                    "holder_name": "Holder One",
+                    "asset_class": "Hybrid",
+                    "asset_bucket": "Equity",
+                    "current_value": 50.0,
+                    "current_allocation_percent": 20.0,
+                },
+                {
+                    "holder_name": "Holder Two",
+                    "asset_class": "Equity",
+                    "asset_bucket": "Equity",
+                    "current_value": 50.0,
+                    "current_allocation_percent": 100.0,
+                },
+            ],
+        },
+        "mutual_fund_holdings": {
+            "rows": [
+                {
+                    "holder_name": "Holder One",
+                    "scheme_name": "Debt Fund",
+                    "asset_bucket": "Debt",
+                    "current_value": 200.0,
+                },
+            ],
+        },
+    }
+
+    question = (
+        "Display my Portfolio as a Family and as per individual Asset Allocation wise "
+        "(Asset Allocation is a display of funds in the form of Equity, Debt, Hybrid, "
+        "Balanced Advantage, International)"
+    )
+    plan, result = _execute(question, context)
+    answer = _structured_fallback_answer(question, result)
+
+    assert plan.datasets == ["asset_allocations", "holder_asset_allocations"]
+    assert plan.filters == {}
+    assert plan.group_by == []
+    assert result["datasets"]["asset_allocations"]["matched_rows"] == 3
+    assert result["datasets"]["holder_asset_allocations"]["matched_rows"] == 3
+    assert "Family Allocation: Debt/Fixed Income: current_value 300.0, allocation 60.0%" in answer
+    assert "Hybrid: current_value 100.0, allocation 20.0%" in answer
+    assert "Individual Allocation: Holder One:" in answer
+    assert "Holder Two: Equity: current_value 50.0, allocation 100.0%" in answer
+
+
+def test_asset_class_segregation_uses_sub_asset_rows_for_family_and_individual():
+    context = {
+        "sub_asset_allocations": {
+            "rows": [
+                {
+                    "asset_class": "Equity",
+                    "sub_asset_class": "Large Cap",
+                    "asset_bucket": "Equity",
+                    "current_value": 100.0,
+                    "current_allocation_percent": 10.0,
+                },
+                {
+                    "asset_class": "Hybrid",
+                    "sub_asset_class": "Dynamic Asset Allocation or Balanced Advantage",
+                    "asset_bucket": "Equity",
+                    "current_value": 200.0,
+                    "current_allocation_percent": 20.0,
+                },
+                {
+                    "asset_class": "Debt/Fixed Income",
+                    "sub_asset_class": "Banking and PSU",
+                    "asset_bucket": "Debt",
+                    "current_value": 300.0,
+                    "current_allocation_percent": 30.0,
+                },
+            ],
+            "holder_rows": [
+                {
+                    "holder_name": "Holder One",
+                    "asset_class": "Equity",
+                    "sub_asset_class": "Large Cap",
+                    "asset_bucket": "Equity",
+                    "current_value": 40.0,
+                    "current_allocation_percent": 8.0,
+                },
+                {
+                    "holder_name": "Holder One",
+                    "asset_class": "Debt/Fixed Income",
+                    "sub_asset_class": "Banking and PSU",
+                    "asset_bucket": "Debt",
+                    "current_value": 60.0,
+                    "current_allocation_percent": 12.0,
+                },
+                {
+                    "holder_name": "Holder Two",
+                    "asset_class": "Hybrid",
+                    "sub_asset_class": "Multi Asset Allocation",
+                    "asset_bucket": "Equity",
+                    "current_value": 80.0,
+                    "current_allocation_percent": 16.0,
+                },
+            ],
+        },
+        "mutual_fund_holdings": {
+            "rows": [
+                {
+                    "holder_name": "Holder One",
+                    "scheme_name": "Debt Fund",
+                    "asset_bucket": "Debt",
+                    "current_value": 60.0,
+                }
+            ]
+        },
+    }
+    question = (
+        "Display my Portfolio as a Family and as per individual in an Asset class segregation investment "
+        "Asset class is Equity (Large Cap, Mid Cap, Flexi Cap, Balance Advantage, Multi Asset) "
+        "Asset class is Debt (Banking and PSU, Corporate Bond Funds, Credit Risk Funds)"
+    )
+    plan, result = _execute(question, context)
+    answer = _asset_class_segregation_answer(question, context)
+
+    assert plan.datasets == ["sub_asset_allocations"]
+    assert plan.filters == {}
+    assert plan.group_by == []
+    assert result["datasets"]["sub_asset_allocations"]["matched_rows"] == 3
+    assert "Family Asset Class Segregation:" in answer
+    assert "Equity / Large Cap: current_value 100.0, allocation 10.0%" in answer
+    assert "Debt/Fixed Income / Banking and PSU: current_value 300.0, allocation 30.0%" in answer
+    assert "Individual Asset Class Segregation: Holder One:" in answer
+    assert "Holder Two: Hybrid / Multi Asset Allocation: current_value 80.0, allocation 16.0%" in answer
+
+
+def test_sub_asset_allocation_compares_parent_and_overall_family_portfolio():
+    context = {
+        "asset_allocations": {
+            "rows": [
+                {
+                    "asset_class": "Debt/Fixed Income",
+                    "asset_bucket": "Debt",
+                    "current_value": 396696043.0,
+                },
+                {
+                    "asset_class": "Equity",
+                    "asset_bucket": "Equity",
+                    "current_value": 245974327.0,
+                },
+            ],
+        }
+    }
+    plan = {
+        "filters": {
+            "asset_bucket": "Debt",
+            "sub_asset_class": "Banking and PSU",
+        }
+    }
+    data = {
+        "datasets": {
+            "sub_asset_allocations": {
+                "rows": [
+                    {
+                        "asset_class": "Debt/Fixed Income",
+                        "sub_asset_class": "Banking and PSU",
+                        "asset_bucket": "Debt",
+                        "current_value": 91503613.0,
+                        "current_allocation_percent": 14.24,
+                    }
+                ]
+            }
+        }
+    }
+
+    answer = _sub_asset_parent_allocation_answer(
+        "What is the Banking and PSU Allocation in % terms as compared to the Debt Portion and overall portfolio?",
+        plan,
+        data,
+        context,
+    )
+
+    assert answer == (
+        "Banking and PSU is 23.07% of Debt/Fixed Income "
+        "and 14.24% of the overall portfolio."
+    )
+
+
+def test_sub_asset_allocation_compares_parent_and_overall_holder_portfolio():
+    context = {
+        "asset_allocations": {
+            "holder_rows": [
+                {
+                    "holder_name": "Holder One",
+                    "asset_class": "Debt/Fixed Income",
+                    "asset_bucket": "Debt",
+                    "current_value": 28760111.0,
+                },
+                {
+                    "holder_name": "Holder One",
+                    "asset_class": "Equity",
+                    "asset_bucket": "Equity",
+                    "current_value": 48555269.0,
+                },
+            ],
+        }
+    }
+    plan = {
+        "filters": {
+            "holder_name": "Holder One",
+            "asset_bucket": "Debt",
+            "sub_asset_class": "Banking and PSU",
+        }
+    }
+    data = {
+        "datasets": {
+            "sub_asset_allocations": {
+                "rows": [
+                    {
+                        "holder_name": "Holder One",
+                        "asset_class": "Debt/Fixed Income",
+                        "sub_asset_class": "Banking and PSU",
+                        "asset_bucket": "Debt",
+                        "current_value": 15194973.0,
+                        "current_allocation_percent": 19.65,
+                    }
+                ]
+            }
+        }
+    }
+
+    answer = _sub_asset_parent_allocation_answer(
+        "What is the Banking and PSU Allocation in % terms as compared to the Debt Portion and overall portfolio for Holder One?",
+        plan,
+        data,
+        context,
+    )
+
+    assert answer == (
+        "For Holder One, Banking and PSU is 52.83% of Debt/Fixed Income "
+        "and 19.65% of the overall portfolio."
     )
 
 

@@ -19,13 +19,17 @@ def execute_portfolio_plan(plan: PortfolioQueryPlan, context: dict[str, Any]) ->
 
         rows = _dataset_rows(dataset, plan)
         rows = _filter_rows(rows, plan.filters)
+        rows = _filter_numeric_rows(rows, plan.numeric_filters)
         if plan.group_by:
             rows = [
                 row
                 for row in rows
                 if all(row.get(field) is not None for field in plan.group_by)
             ]
-            rows = _group_rows(rows, plan.group_by)
+            if plan.sort:
+                rows = _rank_rows_by_group(rows, plan.group_by, plan.sort)
+            else:
+                rows = _group_rows(rows, plan.group_by)
         rows = _sort_rows(rows, plan.sort)
         if plan.limit is not None:
             rows = rows[: plan.limit]
@@ -77,6 +81,36 @@ def _matches_filter(row: dict[str, Any], key: str, value: str | list[str]) -> bo
     )
 
 
+def _filter_numeric_rows(
+    rows: list[dict[str, Any]],
+    numeric_filters: dict[str, dict[str, float]],
+) -> list[dict[str, Any]]:
+    if not numeric_filters:
+        return rows
+    return [
+        row
+        for row in rows
+        if all(_matches_numeric_filter(row, field, bounds) for field, bounds in numeric_filters.items())
+    ]
+
+
+def _matches_numeric_filter(row: dict[str, Any], field: str, bounds: dict[str, float]) -> bool:
+    value = _decimal_or_none(row.get(field))
+    if value is None:
+        return False
+    for operator, threshold in bounds.items():
+        threshold_value = Decimal(str(threshold))
+        if operator == "gt" and not value > threshold_value:
+            return False
+        if operator == "gte" and not value >= threshold_value:
+            return False
+        if operator == "lt" and not value < threshold_value:
+            return False
+        if operator == "lte" and not value <= threshold_value:
+            return False
+    return True
+
+
 def _group_rows(rows: list[dict[str, Any]], group_by: list[str]) -> list[dict[str, Any]]:
     grouped = defaultdict(lambda: defaultdict(Decimal))
     metadata = {}
@@ -100,6 +134,32 @@ def _group_rows(rows: list[dict[str, Any]], group_by: list[str]) -> list[dict[st
         output.append(row)
     _recompute_allocation(output)
     return output
+
+
+def _rank_rows_by_group(
+    rows: list[dict[str, Any]],
+    group_by: list[str],
+    sort: dict[str, str],
+) -> list[dict[str, Any]]:
+    field = sort.get("field")
+    if not field:
+        return rows
+
+    reverse = sort.get("direction") == "desc"
+    ranked: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        value = _decimal_or_none(row.get(field))
+        if value is None:
+            continue
+        key = tuple(row.get(group) for group in group_by)
+        current = ranked.get(key)
+        if current is None:
+            ranked[key] = row
+            continue
+        current_value = _decimal_or_none(current.get(field))
+        if current_value is None or (value > current_value if reverse else value < current_value):
+            ranked[key] = row
+    return list(ranked.values())
 
 
 def _sort_rows(

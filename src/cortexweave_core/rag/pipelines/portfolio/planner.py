@@ -14,6 +14,7 @@ class PortfolioQueryPlan:
     intent: str
     datasets: list[str]
     filters: dict[str, str | list[str]] = field(default_factory=dict)
+    numeric_filters: dict[str, dict[str, float]] = field(default_factory=dict)
     metrics: list[str] = field(default_factory=list)
     group_by: list[str] = field(default_factory=list)
     sort: dict[str, str] | None = None
@@ -27,6 +28,7 @@ class PortfolioQueryPlan:
             "intent": self.intent,
             "datasets": self.datasets,
             "filters": self.filters,
+            "numeric_filters": self.numeric_filters,
             "metrics": self.metrics,
             "group_by": self.group_by,
             "sort": self.sort,
@@ -115,17 +117,35 @@ LOW_SIGNAL_DIMENSION_TOKENS = {
 def build_portfolio_query_plan(question: str, schema: dict[str, Any]) -> PortfolioQueryPlan:
     normalized = _normalize(question)
     filters = _infer_filters(normalized, schema)
+    numeric_filters = _infer_numeric_filters(normalized)
     datasets = _infer_datasets(normalized, filters)
     metrics = _infer_metrics(normalized)
     group_by = _infer_group_by(normalized)
     sort = _infer_sort(normalized)
     limit = _infer_limit(normalized)
     requires_external_metadata, reason = _external_metadata_requirement(normalized)
-    if _asks_for_broad_asset_bucket_distribution(normalized):
+    asks_for_asset_allocation_view = _asks_for_asset_allocation_view(normalized)
+    asks_for_asset_class_segregation = _asks_for_asset_class_segregation_view(normalized)
+    if (
+        _asks_for_broad_asset_bucket_distribution(normalized)
+        and not asks_for_asset_allocation_view
+        and not asks_for_asset_class_segregation
+    ):
         filters.pop("asset_class", None)
         filters["asset_bucket"] = _requested_asset_buckets(normalized)
         group_by = [field for field in group_by if field != "asset_class"]
         group_by = _dedupe([*group_by, "asset_bucket"])
+    if asks_for_asset_class_segregation:
+        filters = {}
+        datasets = ["sub_asset_allocations"]
+        group_by = []
+    if asks_for_asset_allocation_view:
+        filters.pop("asset_bucket", None)
+        filters.pop("asset_class", None)
+        datasets = ["asset_allocations"]
+        group_by = []
+        if _asks_for_family_and_individual_view(normalized):
+            datasets.append("holder_asset_allocations")
     if _asks_for_holder_ranking(normalized):
         filters.pop("holder_name", None)
         datasets = ["holder_returns"]
@@ -135,6 +155,19 @@ def build_portfolio_query_plan(question: str, schema: dict[str, Any]) -> Portfol
         datasets = ["holder_returns"]
         group_by = []
         metrics = _dedupe(["current_value", *metrics])
+    if (
+        _asks_for_individual_holder_view(normalized)
+        and not asks_for_asset_allocation_view
+        and not asks_for_asset_class_segregation
+    ):
+        filters.pop("holder_name", None)
+        group_by = _dedupe([*group_by, "holder_name"])
+    if (
+        _asks_for_unscoped_holder_ranking(normalized, filters, schema)
+        and not asks_for_asset_allocation_view
+        and not asks_for_asset_class_segregation
+    ):
+        group_by = _dedupe([*group_by, "holder_name"])
 
     if _asks_for_reported_average_xirr(normalized) and (
         filters.get("asset_bucket") or filters.get("asset_class")
@@ -152,6 +185,8 @@ def build_portfolio_query_plan(question: str, schema: dict[str, Any]) -> Portfol
         has_fund_holdings
         and asks_for_funds
         and not _asks_for_reported_average_xirr(normalized)
+        and not asks_for_asset_allocation_view
+        and not asks_for_asset_class_segregation
     ):
         datasets = [dataset for dataset in datasets if dataset not in {"holder_returns", "asset_allocations", "sub_asset_allocations"}]
         if "mutual_fund_holdings" not in datasets:
@@ -178,6 +213,7 @@ def build_portfolio_query_plan(question: str, schema: dict[str, Any]) -> Portfol
         intent="planned_portfolio_query",
         datasets=_dedupe(datasets),
         filters=filters,
+        numeric_filters=numeric_filters,
         metrics=metrics,
         group_by=group_by,
         sort=sort,
@@ -298,6 +334,7 @@ def _validated_plan_from_payload(payload: dict[str, Any], schema: dict[str, Any]
     datasets = [dataset for dataset in _as_list(payload.get("datasets")) if dataset in ALLOWED_DATASETS]
     filters = _validated_filters(payload.get("filters") or {}, schema)
     metrics = [metric for metric in _as_list(payload.get("metrics")) if metric in ALLOWED_METRICS]
+    numeric_filters = _infer_numeric_filters(_normalize(question))
     group_by = [field for field in _as_list(payload.get("group_by")) if field in ALLOWED_GROUP_BY]
     sort = payload.get("sort") if isinstance(payload.get("sort"), dict) else None
     if sort:
@@ -331,6 +368,7 @@ def _validated_plan_from_payload(payload: dict[str, Any], schema: dict[str, Any]
         intent="planned_portfolio_query",
         datasets=_dedupe(datasets),
         filters=filters,
+        numeric_filters=numeric_filters,
         metrics=metrics,
         group_by=group_by,
         sort=sort,
@@ -352,13 +390,30 @@ def _repair_model_plan_for_question(
     normalized = _normalize(question)
     has_fund_holdings = bool(schema.get("mutual_fund_schemes"))
     asks_for_funds = any(term in normalized for term in ("fund", "funds", "scheme", "schemes", "mutual fund", "mutual funds"))
-    if _asks_for_reported_average_xirr(normalized) and (filters.get("asset_bucket") or filters.get("asset_class")):
+    asks_for_asset_allocation_view = _asks_for_asset_allocation_view(normalized)
+    asks_for_asset_class_segregation = _asks_for_asset_class_segregation_view(normalized)
+    if asks_for_asset_class_segregation:
+        filters = {}
+        group_by = []
+        datasets = ["sub_asset_allocations"]
+    elif asks_for_asset_allocation_view:
+        filters.pop("asset_bucket", None)
+        filters.pop("asset_class", None)
+        group_by = []
+        datasets = ["asset_allocations"]
+        if _asks_for_family_and_individual_view(normalized):
+            datasets.append("holder_asset_allocations")
+    elif _asks_for_reported_average_xirr(normalized) and (filters.get("asset_bucket") or filters.get("asset_class")):
         datasets = ["asset_allocations"]
     elif has_fund_holdings and asks_for_funds:
         datasets = [dataset for dataset in datasets if dataset not in {"holder_returns", "asset_allocations", "sub_asset_allocations"}]
         if "mutual_fund_holdings" not in datasets:
             datasets.insert(0, "mutual_fund_holdings")
-    if _asks_for_broad_asset_bucket_distribution(normalized):
+    if (
+        _asks_for_broad_asset_bucket_distribution(normalized)
+        and not asks_for_asset_allocation_view
+        and not asks_for_asset_class_segregation
+    ):
         filters.pop("asset_class", None)
         filters["asset_bucket"] = _requested_asset_buckets(normalized)
         group_by = [field for field in group_by if field != "asset_class"]
@@ -459,7 +514,7 @@ def _infer_metrics(normalized: str) -> list[str]:
 
 def _infer_group_by(normalized: str) -> list[str]:
     group_by = []
-    asks_for_holder_view = any(term in normalized for term in ("by holder", "holder wise", "holder-wise", "each holder", "individual"))
+    asks_for_holder_view = _asks_for_individual_holder_view(normalized)
     if asks_for_holder_view:
         group_by.append("holder_name")
     if _asks_for_broad_asset_bucket_distribution(normalized):
@@ -481,9 +536,9 @@ def _infer_sort(normalized: str) -> dict[str, str] | None:
     contextual_sort = _question_sort_override(normalized)
     if contextual_sort:
         return contextual_sort
-    if any(term in normalized for term in ("highest", "largest", "top", "maximum", "biggest")):
+    if _has_any_token_or_phrase(normalized, ("highest", "largest", "top", "maximum", "biggest")):
         return {"field": "current_value", "direction": "desc"}
-    if any(term in normalized for term in ("lowest", "smallest", "minimum")):
+    if _has_any_token_or_phrase(normalized, ("lowest", "smallest", "minimum")):
         return {"field": "current_value", "direction": "asc"}
     return None
 
@@ -491,8 +546,8 @@ def _infer_sort(normalized: str) -> dict[str, str] | None:
 def _question_sort_override(normalized: str) -> dict[str, str] | None:
     high_terms = ("best", "highest", "largest", "top", "maximum", "biggest")
     low_terms = ("lowest", "smallest", "minimum", "least", "worst", "shortest")
-    has_high = any(term in normalized for term in high_terms)
-    has_low = any(term in normalized for term in low_terms)
+    has_high = _has_any_token_or_phrase(normalized, high_terms)
+    has_low = _has_any_token_or_phrase(normalized, low_terms)
     if any(term in normalized for term in ("held shortest", "shortest held", "held the shortest", "held least", "least held")):
         return {"field": "holding_period_months", "direction": "asc"}
     if any(term in normalized for term in ("held longest", "longest held", "holding period", "held the longest")):
@@ -559,6 +614,68 @@ def _asks_for_family_total_assets(normalized: str) -> bool:
         and any(term in normalized for term in total_terms)
         and any(term in normalized for term in asset_terms)
     )
+
+
+def _asks_for_asset_allocation_view(normalized: str) -> bool:
+    return "asset allocation" in normalized or "allocation wise" in normalized or "allocation-wise" in normalized
+
+
+def _asks_for_asset_class_segregation_view(normalized: str) -> bool:
+    return (
+        "asset class segregation" in normalized
+        or "asset-class segregation" in normalized
+        or ("segregation" in normalized and "asset class" in normalized)
+    )
+
+
+def _asks_for_family_and_individual_view(normalized: str) -> bool:
+    return (
+        any(term in normalized for term in ("family", "household", "overall"))
+        and _asks_for_individual_holder_view(normalized)
+    )
+
+
+def _asks_for_individual_holder_view(normalized: str) -> bool:
+    return any(
+        term in normalized
+        for term in ("by holder", "holder wise", "holder-wise", "each holder", "individual", "individually")
+    )
+
+
+def _asks_for_unscoped_holder_ranking(
+    normalized: str,
+    filters: dict[str, str | list[str]],
+    schema: dict[str, Any],
+) -> bool:
+    if filters.get("holder_name"):
+        return False
+    if not schema.get("holders"):
+        return False
+    return (
+        any(term in normalized for term in ("fund", "funds", "scheme", "schemes", "asset", "assets", "holding", "holdings"))
+        and any(term in normalized for term in ("highest", "lowest", "best", "worst", "longest", "shortest"))
+        and any(term in normalized for term in ("xirr", "return", "returns", "holding period", "held"))
+    )
+
+
+def _infer_numeric_filters(normalized: str) -> dict[str, dict[str, float]]:
+    if not any(term in normalized for term in ("month", "months", "holding period", "held")):
+        return {}
+
+    bounds: dict[str, float] = {}
+    for pattern, operator in (
+        (r"(?:at\s*least|atleast|>=)\s*(\d+(?:\.\d+)?)", "gte"),
+        (r"(?:greater than|more than|above|over|>)\s*(\d+(?:\.\d+)?)", "gt"),
+        (r"(?:at\s*most|atmost|<=)\s*(\d+(?:\.\d+)?)", "lte"),
+        (r"(?:less than|fewer than|under|below|<)\s*(\d+(?:\.\d+)?)", "lt"),
+    ):
+        match = re.search(pattern, normalized)
+        if match:
+            bounds[operator] = float(match.group(1))
+
+    if not bounds:
+        return {}
+    return {"holding_period_months": bounds}
 
 
 def _requested_asset_buckets(normalized: str) -> list[str]:
@@ -638,6 +755,11 @@ def _should_match_holding_dimension(normalized: str, dimension_key: str) -> bool
     if dimension_key == "security_name":
         return any(term in normalized for term in ("security", "bond", "fd", "fixed deposit", "holding"))
     return True
+
+
+def _has_any_token_or_phrase(normalized: str, terms: tuple[str, ...]) -> bool:
+    tokens = set(_tokens(normalized))
+    return any(term in normalized if " " in term else term in tokens for term in terms)
 
 
 def _tokens_match(left: str, right: str) -> bool:
