@@ -1,4 +1,5 @@
 import asyncio
+import re
 from typing import Any
 
 from cortexweave_core.rag.db import get_session
@@ -80,7 +81,12 @@ def _answer_portfolio_query_sync(question: str) -> dict:
         }
 
     context = build_portfolio_context(reports)
-    enrichment_answer = _enrichment_answer(question, context)
+    enrichment_answer = _enrichment_answer(
+        question,
+        context,
+        knowledge_base_name=knowledge_base_name,
+        family_id=family_id,
+    )
     if enrichment_answer:
         return {
             **enrichment_answer,
@@ -109,7 +115,12 @@ def _answer_portfolio_query_sync(question: str) -> dict:
     }
 
 
-def _enrichment_answer(question: str, context: dict[str, Any]) -> dict[str, Any] | None:
+def _enrichment_answer(
+    question: str,
+    context: dict[str, Any],
+    knowledge_base_name: str | None = None,
+    family_id: str | None = None,
+) -> dict[str, Any] | None:
     normalized = question.lower()
     if any(term in normalized for term in ("unresolved", "ambiguous", "could not resolve", "fund match")):
         dataset = context.get("fund_resolution_status") or {"rows": []}
@@ -186,21 +197,36 @@ def _enrichment_answer(question: str, context: dict[str, Any]) -> dict[str, Any]
                 rows,
                 default_sort={"key": "shared_stocks", "direction": "desc"},
                 actions=["csv_export"],
-                warnings=_limit_warnings(len(all_rows)),
+                warnings=_limit_warnings(len(all_rows), len(rows)),
             )],
         }
-    if any(term in normalized for term in ("overlap", "duplicate", "duplicated", "common stocks", "same stocks", "underlying stocks", "constituents")):
-        dataset = context.get("stock_overlap") or {"rows": []}
-        all_rows = dataset.get("rows") or []
-        rows = all_rows[:MAX_OVERLAP_ROWS]
+    if _asks_for_stock_overlap(normalized):
+        requested_holders = _requested_holder_names(context, normalized)
+        equity_only = _stock_overlap_equity_only(normalized)
+        all_rows = _stock_overlap_rows(context, requested_holders, equity_only=equity_only)
+        requested_limit = _requested_limit(normalized)
+        row_limit = requested_limit or MAX_OVERLAP_ROWS
+        rows = all_rows[:row_limit]
+        can_load_full_table = requested_limit is None
+        holder_label = f" for {', '.join(requested_holders)}" if requested_holders else ""
         return {
             "answer": _limited_overlap_answer(
                 len(all_rows),
-                "duplicated stock(s) across enriched mutual funds",
+                f"duplicated stock(s) across enriched mutual funds{holder_label}",
                 rows,
             ),
             "intent": "stock_overlap",
-            "data": {"datasets": {"stock_overlap": {"rows": rows, "matched_rows": len(rows), "total_rows": len(all_rows)}}},
+            "data": {
+                "datasets": {
+                    "stock_overlap": {
+                        "rows": rows,
+                        "matched_rows": len(rows),
+                        "total_rows": len(all_rows),
+                        "holder_names": requested_holders,
+                        "nature": "EQUITY" if equity_only else None,
+                    }
+                }
+            },
             "warnings": _enrichment_warnings((context.get("fund_resolution_status") or {}).get("rows") or []),
             "tables": [_table(
                 "stock_overlap",
@@ -219,10 +245,93 @@ def _enrichment_answer(question: str, context: dict[str, Any]) -> dict[str, Any]
                 rows,
                 default_sort={"key": "aggregate_portfolio_exposure_percent", "direction": "desc"},
                 actions=["csv_export"],
-                warnings=_limit_warnings(len(all_rows)),
+                warnings=(
+                    _table_scope_warnings(len(all_rows), len(rows))
+                    if can_load_full_table
+                    else _limit_warnings(len(all_rows), len(rows))
+                ),
+                total_rows=len(all_rows),
+                query_ref=_query_ref(question, knowledge_base_name, family_id) if can_load_full_table else None,
             )],
         }
     return None
+
+
+def _asks_for_stock_overlap(normalized: str) -> bool:
+    stock_terms = ("stock", "stocks", "security", "securities", "constituents", "holdings")
+    overlap_terms = (
+        "overlap",
+        "duplicate",
+        "duplicated",
+        "common",
+        "same",
+        "underlying",
+        "more than one",
+        "multiple funds",
+        "across funds",
+        "across my mutual funds",
+    )
+    return any(term in normalized for term in stock_terms) and any(term in normalized for term in overlap_terms)
+
+
+def _stock_overlap_equity_only(normalized: str) -> bool:
+    broad_terms = ("security", "securities", "instrument", "instruments", "all underlying", "all holdings")
+    return not any(term in normalized for term in broad_terms)
+
+
+def _requested_limit(normalized: str) -> int | None:
+    match = re.search(r"\btop\s+(\d{1,3})\b", normalized)
+    if not match:
+        return None
+    return max(1, min(int(match.group(1)), MAX_OVERLAP_ROWS))
+
+
+def _stock_overlap_rows(
+    context: dict[str, Any],
+    holder_names: list[str],
+    equity_only: bool = True,
+) -> list[dict[str, Any]]:
+    exposure_rows = (context.get("fund_stock_holdings") or {}).get("rows") or []
+    if holder_names:
+        exposure_rows = [row for row in exposure_rows if row.get("holder_name") in holder_names]
+    if equity_only:
+        exposure_rows = [row for row in exposure_rows if row.get("nature") == "EQUITY"]
+    if not exposure_rows:
+        return []
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for exposure in exposure_rows:
+        stock = exposure.get("stock_name")
+        if not stock:
+            continue
+        target = grouped.setdefault(str(stock), {
+            "stock_name": stock,
+            "sector": exposure.get("sector"),
+            "nature": exposure.get("nature"),
+            "funds": [],
+            "aggregate_portfolio_exposure_percent": 0.0,
+            "aggregate_weighted_market_value": 0.0,
+            "max_pct_in_single_fund": 0.0,
+        })
+        fund = exposure.get("matched_name") or exposure.get("scheme_name")
+        if fund and fund not in target["funds"]:
+            target["funds"].append(fund)
+        target["aggregate_portfolio_exposure_percent"] += float(exposure.get("portfolio_weighted_pct") or 0)
+        target["aggregate_weighted_market_value"] += float(exposure.get("weighted_market_value") or 0)
+        target["max_pct_in_single_fund"] = max(
+            target["max_pct_in_single_fund"],
+            float(exposure.get("pct_of_fund_assets") or 0),
+        )
+
+    rows = []
+    for row in grouped.values():
+        row["fund_count"] = len(row["funds"])
+        if row["fund_count"] >= 2:
+            row["aggregate_portfolio_exposure_percent"] = round(row["aggregate_portfolio_exposure_percent"], 4)
+            row["aggregate_weighted_market_value"] = round(row["aggregate_weighted_market_value"], 2)
+            rows.append(row)
+    rows.sort(key=lambda row: row["aggregate_portfolio_exposure_percent"], reverse=True)
+    return rows
 
 
 def _table(
@@ -234,6 +343,8 @@ def _table(
     default_sort: dict[str, str] | None = None,
     actions: list[str] | None = None,
     warnings: list[str] | None = None,
+    total_rows: int | None = None,
+    query_ref: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     return {
         "id": table_id,
@@ -244,7 +355,15 @@ def _table(
         "default_sort": default_sort,
         "actions": actions or [],
         "warnings": warnings or [],
+        "total_rows": total_rows if total_rows is not None else len(rows),
+        "query_ref": query_ref,
     }
+
+
+def _query_ref(question: str, knowledge_base_name: str | None, family_id: str | None) -> dict[str, str] | None:
+    if not knowledge_base_name or not family_id:
+        return None
+    return {"text": question, "knowledge_base_name": knowledge_base_name, "family_id": family_id}
 
 
 def _limited_overlap_answer(total_rows: int, label: str, rows: list[dict[str, Any]]) -> str:
@@ -253,10 +372,16 @@ def _limited_overlap_answer(total_rows: int, label: str, rows: list[dict[str, An
     return f"Found {total_rows} {label}."
 
 
-def _limit_warnings(total_rows: int) -> list[str]:
-    if total_rows <= MAX_OVERLAP_ROWS:
+def _limit_warnings(total_rows: int, shown_rows: int = MAX_OVERLAP_ROWS) -> list[str]:
+    if total_rows <= shown_rows:
         return []
-    return [f"Showing top {MAX_OVERLAP_ROWS} rows by exposure out of {total_rows} total matches."]
+    return [f"Showing top {shown_rows} rows by exposure out of {total_rows} total matches."]
+
+
+def _table_scope_warnings(total_rows: int, highlighted_rows: int) -> list[str]:
+    if total_rows <= highlighted_rows:
+        return []
+    return [f"Answer highlights top {highlighted_rows} rows by exposure; open table to load and search all {total_rows} matches."]
 
 
 def _enrichment_warnings(rows: list[dict[str, Any]]) -> list[str]:

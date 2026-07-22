@@ -5,6 +5,7 @@ from cortexweave_core.rag.pipelines.portfolio.planner import (
 )
 from cortexweave_core.rag.pipelines.portfolio.query_engine import (
     _asset_class_segregation_answer,
+    _enrichment_answer,
     _sub_asset_parent_allocation_answer,
     _structured_fallback_answer,
 )
@@ -13,6 +14,98 @@ from cortexweave_core.rag.pipelines.portfolio.query_engine import (
 def _execute(question: str, context: dict):
     plan = build_portfolio_query_plan(question, portfolio_schema_from_context(context))
     return plan, execute_portfolio_plan(plan, context)
+
+
+def test_stock_overlap_understands_more_than_one_fund_holder_and_top_limit():
+    fatema = "Ms. ROOWALLA FATEMA SULEMANJI"
+    rows = []
+    for idx in range(11):
+        for fund in ("Fund A", "Fund B"):
+            rows.append({
+                "holder_name": fatema,
+                "stock_name": f"Stock {idx:02d}",
+                "sector": "Financial",
+                "nature": "EQUITY",
+                "matched_name": fund,
+                "portfolio_weighted_pct": 20 - idx,
+                "weighted_market_value": 1000 - idx,
+                "pct_of_fund_assets": 5 + idx,
+            })
+    rows.extend([
+        {
+            "holder_name": fatema,
+            "stock_name": "Repo",
+            "nature": "CASH",
+            "matched_name": "Cash Fund A",
+            "portfolio_weighted_pct": 500,
+            "weighted_market_value": 5000,
+            "pct_of_fund_assets": 50,
+        },
+        {
+            "holder_name": fatema,
+            "stock_name": "Repo",
+            "nature": "CASH",
+            "matched_name": "Cash Fund B",
+            "portfolio_weighted_pct": 500,
+            "weighted_market_value": 5000,
+            "pct_of_fund_assets": 50,
+        },
+    ])
+
+    result = _enrichment_answer(
+        "Top 10 stocks held by more than one mutual fund for Fatema",
+        {
+            "fund_resolution_status": {"rows": []},
+            "fund_stock_holdings": {"rows": rows},
+            "holder_returns": {"rows": [{"holder_name": fatema}, {"holder_name": "Other Holder"}]},
+        },
+    )
+
+    dataset = result["data"]["datasets"]["stock_overlap"]
+    table_rows = result["tables"][0]["rows"]
+    assert result["intent"] == "stock_overlap"
+    assert dataset["holder_names"] == [fatema]
+    assert dataset["matched_rows"] == 10
+    assert dataset["total_rows"] == 11
+    assert len(table_rows) == 10
+    assert table_rows[0]["stock_name"] == "Stock 00"
+    assert "Repo" not in {row["stock_name"] for row in table_rows}
+
+
+def test_security_overlap_can_include_non_equity_holdings():
+    fatema = "Ms. ROOWALLA FATEMA SULEMANJI"
+    rows = [
+        {
+            "holder_name": fatema,
+            "stock_name": "Repo",
+            "nature": "CASH",
+            "matched_name": "Cash Fund A",
+            "portfolio_weighted_pct": 500,
+            "weighted_market_value": 5000,
+            "pct_of_fund_assets": 50,
+        },
+        {
+            "holder_name": fatema,
+            "stock_name": "Repo",
+            "nature": "CASH",
+            "matched_name": "Cash Fund B",
+            "portfolio_weighted_pct": 500,
+            "weighted_market_value": 5000,
+            "pct_of_fund_assets": 50,
+        },
+    ]
+
+    result = _enrichment_answer(
+        "Show me top overlapping securities across my mutual funds",
+        {
+            "fund_resolution_status": {"rows": []},
+            "fund_stock_holdings": {"rows": rows},
+            "holder_returns": {"rows": [{"holder_name": fatema}]},
+        },
+    )
+
+    assert result["data"]["datasets"]["stock_overlap"]["nature"] is None
+    assert result["tables"][0]["rows"][0]["stock_name"] == "Repo"
 
 
 def test_highest_and_lowest_xirr_route_to_mutual_fund_holdings():
