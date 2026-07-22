@@ -1,6 +1,10 @@
 from sqlalchemy.orm import Session, selectinload
 
-from cortexweave_core.rag.pipelines.portfolio.models import PortfolioFamily, PortfolioReport
+from cortexweave_core.rag.pipelines.portfolio.models import (
+    PortfolioFamily,
+    PortfolioMFHoldingResolution,
+    PortfolioReport,
+)
 
 
 class PortfolioReportDAO:
@@ -22,6 +26,9 @@ class PortfolioReportDAO:
             selectinload(PortfolioReport.asset_allocations),
             selectinload(PortfolioReport.sub_asset_allocations),
             selectinload(PortfolioReport.mutual_fund_holdings),
+            selectinload(PortfolioReport.fund_resolutions),
+            selectinload(PortfolioReport.fund_resolutions).selectinload(PortfolioMFHoldingResolution.mutual_fund_holding),
+            selectinload(PortfolioReport.fund_resolutions).selectinload(PortfolioMFHoldingResolution.security_exposures),
             selectinload(PortfolioReport.pms_holdings),
             selectinload(PortfolioReport.bond_holdings),
         ).filter_by(

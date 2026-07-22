@@ -121,6 +121,146 @@ def mutual_fund_holdings(reports: list[PortfolioReport]) -> dict:
     return {"rows": rows, "totals": _totals(rows, invested_key="cost")}
 
 
+def fund_resolution_status(reports: list[PortfolioReport]) -> dict:
+    rows = []
+    for report in reports:
+        for resolution in getattr(report, "fund_resolutions", []) or []:
+            rows.append({
+                "holder_name": report.holder_name,
+                "source_file_name": report.source_file_name,
+                "resolution_id": resolution.id,
+                "mutual_fund_holding_id": resolution.mutual_fund_holding_id,
+                "scheme_name": resolution.raw_scheme_name,
+                "statement_category": resolution.statement_category,
+                "scheme_code": resolution.scheme_code,
+                "matched_name": resolution.matched_name,
+                "status": resolution.status,
+                "confidence": resolution.confidence,
+                "score": _num(resolution.score),
+                "lead": _num(resolution.lead),
+                "candidates": resolution.alternatives_json or [],
+                "error_message": resolution.error_message,
+            })
+    return {"rows": rows, "totals": {"total_funds": len(rows)}}
+
+
+def fund_stock_holdings(reports: list[PortfolioReport]) -> dict:
+    rows = []
+    for report in reports:
+        for resolution in getattr(report, "fund_resolutions", []) or []:
+            holding = resolution.mutual_fund_holding
+            for exposure in resolution.security_exposures:
+                rows.append({
+                    "holder_name": report.holder_name,
+                    "scheme_name": holding.scheme_name if holding else resolution.raw_scheme_name,
+                    "matched_name": resolution.matched_name,
+                    "scheme_code": resolution.scheme_code,
+                    "asset_class": holding.asset_class if holding else None,
+                    "asset_bucket": _asset_bucket(holding.asset_class if holding else None),
+                    "sub_asset_class": holding.sub_asset_class if holding else None,
+                    "stock_name": exposure.stock_name,
+                    "sector": exposure.sector,
+                    "instrument": exposure.instrument,
+                    "nature": exposure.nature,
+                    "pct_of_fund_assets": _num(exposure.pct_of_fund_assets),
+                    "fund_current_value": _num(exposure.fund_current_value),
+                    "portfolio_weighted_pct": _num(exposure.portfolio_weighted_pct),
+                    "weighted_market_value": _num(exposure.weighted_market_value),
+                    "as_of_date": exposure.as_of_date,
+                })
+    return {"rows": rows, "totals": _totals(rows, invested_key="weighted_market_value")}
+
+
+def stock_overlap(reports: list[PortfolioReport], min_fund_count: int = 2) -> dict:
+    rows = fund_stock_holdings(reports)["rows"]
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        stock = row.get("stock_name")
+        if not stock:
+            continue
+        target = grouped.setdefault(str(stock), {
+            "stock_name": stock,
+            "sector": row.get("sector"),
+            "nature": row.get("nature"),
+            "funds": [],
+            "aggregate_portfolio_exposure_percent": 0.0,
+            "aggregate_weighted_market_value": 0.0,
+            "max_pct_in_single_fund": 0.0,
+        })
+        fund_label = row.get("matched_name") or row.get("scheme_name")
+        if fund_label and fund_label not in target["funds"]:
+            target["funds"].append(fund_label)
+        target["aggregate_portfolio_exposure_percent"] += float(row.get("portfolio_weighted_pct") or 0)
+        target["aggregate_weighted_market_value"] += float(row.get("weighted_market_value") or 0)
+        target["max_pct_in_single_fund"] = max(
+            target["max_pct_in_single_fund"],
+            float(row.get("pct_of_fund_assets") or 0),
+        )
+    output = []
+    for row in grouped.values():
+        row["fund_count"] = len(row["funds"])
+        if row["fund_count"] >= min_fund_count:
+            row["aggregate_portfolio_exposure_percent"] = round(row["aggregate_portfolio_exposure_percent"], 4)
+            row["aggregate_weighted_market_value"] = round(row["aggregate_weighted_market_value"], 2)
+            output.append(row)
+    output.sort(key=lambda row: row["aggregate_portfolio_exposure_percent"], reverse=True)
+    return {"rows": output, "totals": {"overlap_count": len(output)}}
+
+
+def sector_overlap(reports: list[PortfolioReport]) -> dict:
+    rows = fund_stock_holdings(reports)["rows"]
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        sector = row.get("sector") or "Unclassified"
+        target = grouped.setdefault(str(sector), {
+            "sector": sector,
+            "funds": {},
+            "aggregate_portfolio_exposure_percent": 0.0,
+            "aggregate_weighted_market_value": 0.0,
+        })
+        fund_label = row.get("matched_name") or row.get("scheme_name")
+        if fund_label:
+            target["funds"][fund_label] = target["funds"].get(fund_label, 0.0) + float(row.get("portfolio_weighted_pct") or 0)
+        target["aggregate_portfolio_exposure_percent"] += float(row.get("portfolio_weighted_pct") or 0)
+        target["aggregate_weighted_market_value"] += float(row.get("weighted_market_value") or 0)
+    output = []
+    for row in grouped.values():
+        top = sorted(row["funds"].items(), key=lambda item: item[1], reverse=True)[:5]
+        output.append({
+            "sector": row["sector"],
+            "fund_count": len(row["funds"]),
+            "aggregate_portfolio_exposure_percent": round(row["aggregate_portfolio_exposure_percent"], 4),
+            "aggregate_weighted_market_value": round(row["aggregate_weighted_market_value"], 2),
+            "top_contributing_funds": [name for name, _ in top],
+        })
+    output.sort(key=lambda row: row["aggregate_portfolio_exposure_percent"], reverse=True)
+    return {"rows": output, "totals": {"sector_count": len(output)}}
+
+
+def fund_overlap_matrix(reports: list[PortfolioReport]) -> dict:
+    by_fund: dict[str, set[str]] = defaultdict(set)
+    for row in fund_stock_holdings(reports)["rows"]:
+        fund = row.get("matched_name") or row.get("scheme_name")
+        stock = row.get("stock_name")
+        if fund and stock:
+            by_fund[str(fund)].add(str(stock))
+    funds = sorted(by_fund)
+    rows = []
+    for i, fund_a in enumerate(funds):
+        for fund_b in funds[i + 1:]:
+            shared = sorted(by_fund[fund_a] & by_fund[fund_b])
+            if not shared:
+                continue
+            rows.append({
+                "fund_a": fund_a,
+                "fund_b": fund_b,
+                "shared_stocks": len(shared),
+                "stocks": shared,
+            })
+    rows.sort(key=lambda row: row["shared_stocks"], reverse=True)
+    return {"rows": rows, "totals": {"pairs_with_overlap": len(rows)}}
+
+
 def _sub_asset_holding_periods_by_allocation(report: PortfolioReport) -> dict:
     periods = {}
     current_asset_class = None

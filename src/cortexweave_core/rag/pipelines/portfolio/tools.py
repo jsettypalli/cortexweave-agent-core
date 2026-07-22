@@ -57,6 +57,10 @@ async def answer_portfolio_query(question: str) -> dict:
     question exactly as written. Do not rewrite it or add holder/family qualifiers
     from chat history; the query engine handles planning, filtering, sorting,
     grouping, and ranking.
+
+    If the returned dict contains `tables`, return the complete dict to the user
+    as raw JSON only. Do not convert portfolio tables to Markdown; the UI renders
+    structured tables in a modal.
     """
     return await _answer_portfolio_query(question)
 
@@ -312,3 +316,75 @@ async def get_report_sources() -> dict:
     if not reports:
         return {"sources": [], **_not_found(knowledge_base_name, family_id)}
     return {"sources": analytics.report_sources(reports)}
+
+
+async def get_fund_resolution_status() -> dict:
+    """
+    Returns mutual-fund enrichment resolution status for the configured
+    portfolio family, including unresolved/ambiguous funds and candidate matches.
+    """
+    return await asyncio.to_thread(_run, analytics.fund_resolution_status)
+
+
+async def get_fund_stock_holdings(
+    holder_name: str | None = None,
+    scheme_name: str | None = None,
+    stock_name: str | None = None,
+    sector: str | None = None,
+    nature: str | None = None,
+) -> dict:
+    """
+    Returns underlying stock/security holdings fetched through fund enrichment.
+
+    Use this when the user asks what stocks are inside mutual funds, what a
+    specific fund holds, or what fund-level exposure exists to a stock/sector.
+    """
+    result = await asyncio.to_thread(_run, analytics.fund_stock_holdings)
+    rows = [
+        row for row in result.get("rows") or []
+        if _matches_holder(row.get("holder_name"), holder_name)
+        and _matches_contains(row.get("scheme_name"), scheme_name, row.get("matched_name"))
+        and _matches_contains(row.get("stock_name"), stock_name)
+        and _matches_contains(row.get("sector"), sector)
+        and _matches_text(row.get("nature"), nature)
+    ]
+    return {"filters": {
+        "holder_name": holder_name,
+        "scheme_name": scheme_name,
+        "stock_name": stock_name,
+        "sector": sector,
+        "nature": nature,
+    }, "rows": rows, "totals": result.get("totals")}
+
+
+async def get_stock_overlap(min_fund_count: int = 2) -> dict:
+    """
+    Returns stocks duplicated across enriched mutual funds, with aggregate
+    portfolio-weighted exposure and contributing funds.
+    """
+    reports, knowledge_base_name, family_id = await asyncio.to_thread(_load_reports)
+    if not reports:
+        return _not_found(knowledge_base_name, family_id)
+    return analytics.stock_overlap(reports, min_fund_count=max(1, min_fund_count))
+
+
+async def get_sector_overlap() -> dict:
+    """
+    Returns sector exposure aggregated from enriched underlying fund holdings.
+    """
+    return await asyncio.to_thread(_run, analytics.sector_overlap)
+
+
+async def get_fund_overlap_matrix() -> dict:
+    """
+    Returns pairwise mutual-fund overlap based on shared underlying stocks.
+    """
+    return await asyncio.to_thread(_run, analytics.fund_overlap_matrix)
+
+
+def _matches_contains(row_value: str | None, requested_value: str | None, alternate_value: str | None = None) -> bool:
+    requested = _normalize_text(requested_value)
+    if not requested:
+        return True
+    values = [_normalize_text(row_value), _normalize_text(alternate_value)]
+    return any(requested in value or value in requested for value in values if value)

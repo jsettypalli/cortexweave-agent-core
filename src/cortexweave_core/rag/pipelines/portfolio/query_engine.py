@@ -13,6 +13,8 @@ from cortexweave_core.rag.pipelines.portfolio.planner import (
 )
 from cortexweave_core.utils.config_loader import config
 
+MAX_OVERLAP_ROWS = 50
+
 
 def build_portfolio_context(reports: list[PortfolioReport]) -> dict[str, Any]:
     return {
@@ -23,6 +25,11 @@ def build_portfolio_context(reports: list[PortfolioReport]) -> dict[str, Any]:
         "holder_returns": analytics.holder_returns(reports),
         "pms_holdings": analytics.pms_analysis(reports),
         "bond_holdings": analytics.bond_analysis(reports),
+        "fund_resolution_status": analytics.fund_resolution_status(reports),
+        "fund_stock_holdings": analytics.fund_stock_holdings(reports),
+        "stock_overlap": analytics.stock_overlap(reports),
+        "sector_overlap": analytics.sector_overlap(reports),
+        "fund_overlap_matrix": analytics.fund_overlap_matrix(reports),
     }
 
 
@@ -73,12 +80,20 @@ def _answer_portfolio_query_sync(question: str) -> dict:
         }
 
     context = build_portfolio_context(reports)
+    enrichment_answer = _enrichment_answer(question, context)
+    if enrichment_answer:
+        return {
+            **enrichment_answer,
+            "sources": analytics.report_sources(reports),
+        }
     schema = portfolio_schema_from_context(context)
     plan = build_portfolio_query_plan(question, schema)
     data = execute_portfolio_plan(plan, context)
     warnings = data.pop("warnings", [])
     answer = (
         _asset_class_segregation_answer(question, context)
+        or
+        _sub_asset_parent_percent_answer(question, plan.to_dict(), context)
         or
         _sub_asset_parent_allocation_answer(question, plan.to_dict(), data, context)
         or _structured_fallback_answer(question, data)
@@ -90,7 +105,165 @@ def _answer_portfolio_query_sync(question: str) -> dict:
         "data": data,
         "sources": analytics.report_sources(reports),
         "warnings": warnings,
+        "tables": [],
     }
+
+
+def _enrichment_answer(question: str, context: dict[str, Any]) -> dict[str, Any] | None:
+    normalized = question.lower()
+    if any(term in normalized for term in ("unresolved", "ambiguous", "could not resolve", "fund match")):
+        dataset = context.get("fund_resolution_status") or {"rows": []}
+        rows = dataset.get("rows") or []
+        issues = [row for row in rows if row.get("status") in {"ambiguous", "not_found", "failed"}]
+        return {
+            "answer": f"Found {len(issues)} fund resolution issue(s).",
+            "intent": "resolution_status",
+            "data": {"datasets": {"fund_resolution_status": {"rows": issues, "matched_rows": len(issues)}}},
+            "warnings": _enrichment_warnings(rows),
+            "tables": [_table(
+                "fund_resolution_status",
+                "Fund Resolution Issues",
+                "review",
+                [
+                    ("scheme_name", "Statement Fund", "text"),
+                    ("statement_category", "Category", "text"),
+                    ("status", "Status", "text"),
+                    ("matched_name", "Best Match", "text"),
+                    ("score", "Score", "number"),
+                    ("candidates", "Candidates", "list"),
+                ],
+                issues,
+                actions=["resolve_match"],
+            )],
+        }
+    if any(term in normalized for term in ("sector", "industry", "concentration")) and any(term in normalized for term in ("overlap", "exposure", "concentration", "duplicated", "duplicate")):
+        dataset = context.get("sector_overlap") or {"rows": []}
+        rows = dataset.get("rows") or []
+        return {
+            "answer": f"Found sector exposure across {len(rows)} sector(s).",
+            "intent": "sector_overlap",
+            "data": {"datasets": {"sector_overlap": {"rows": rows, "matched_rows": len(rows)}}},
+            "warnings": _enrichment_warnings((context.get("fund_resolution_status") or {}).get("rows") or []),
+            "tables": [_table(
+                "sector_overlap",
+                "Sector Exposure",
+                "modal",
+                [
+                    ("sector", "Sector", "text"),
+                    ("fund_count", "Funds", "number"),
+                    ("aggregate_portfolio_exposure_percent", "Portfolio Exposure", "percent"),
+                    ("aggregate_weighted_market_value", "Weighted Value", "currency"),
+                    ("top_contributing_funds", "Top Contributing Funds", "list"),
+                ],
+                rows,
+                default_sort={"key": "aggregate_portfolio_exposure_percent", "direction": "desc"},
+                actions=["csv_export"],
+            )],
+        }
+    if any(term in normalized for term in ("matrix", "pairwise", "fund overlap")):
+        dataset = context.get("fund_overlap_matrix") or {"rows": []}
+        all_rows = dataset.get("rows") or []
+        rows = all_rows[:MAX_OVERLAP_ROWS]
+        return {
+            "answer": _limited_overlap_answer(
+                len(all_rows),
+                "fund pair(s) with shared underlying stocks",
+                rows,
+            ),
+            "intent": "fund_overlap_matrix",
+            "data": {"datasets": {"fund_overlap_matrix": {"rows": rows, "matched_rows": len(rows), "total_rows": len(all_rows)}}},
+            "warnings": _enrichment_warnings((context.get("fund_resolution_status") or {}).get("rows") or []),
+            "tables": [_table(
+                "fund_overlap_matrix",
+                "Fund Overlap Matrix",
+                "matrix",
+                [
+                    ("fund_a", "Fund A", "text"),
+                    ("fund_b", "Fund B", "text"),
+                    ("shared_stocks", "Shared Stocks", "number"),
+                    ("stocks", "Stocks", "list"),
+                ],
+                rows,
+                default_sort={"key": "shared_stocks", "direction": "desc"},
+                actions=["csv_export"],
+                warnings=_limit_warnings(len(all_rows)),
+            )],
+        }
+    if any(term in normalized for term in ("overlap", "duplicate", "duplicated", "common stocks", "same stocks", "underlying stocks", "constituents")):
+        dataset = context.get("stock_overlap") or {"rows": []}
+        all_rows = dataset.get("rows") or []
+        rows = all_rows[:MAX_OVERLAP_ROWS]
+        return {
+            "answer": _limited_overlap_answer(
+                len(all_rows),
+                "duplicated stock(s) across enriched mutual funds",
+                rows,
+            ),
+            "intent": "stock_overlap",
+            "data": {"datasets": {"stock_overlap": {"rows": rows, "matched_rows": len(rows), "total_rows": len(all_rows)}}},
+            "warnings": _enrichment_warnings((context.get("fund_resolution_status") or {}).get("rows") or []),
+            "tables": [_table(
+                "stock_overlap",
+                "Duplicated Stock Exposure",
+                "modal",
+                [
+                    ("stock_name", "Stock", "text"),
+                    ("sector", "Sector", "text"),
+                    ("nature", "Nature", "text"),
+                    ("fund_count", "Funds", "number"),
+                    ("aggregate_portfolio_exposure_percent", "Portfolio Exposure", "percent"),
+                    ("aggregate_weighted_market_value", "Weighted Value", "currency"),
+                    ("max_pct_in_single_fund", "Max In Single Fund", "percent"),
+                    ("funds", "Funds Holding It", "list"),
+                ],
+                rows,
+                default_sort={"key": "aggregate_portfolio_exposure_percent", "direction": "desc"},
+                actions=["csv_export"],
+                warnings=_limit_warnings(len(all_rows)),
+            )],
+        }
+    return None
+
+
+def _table(
+    table_id: str,
+    title: str,
+    display: str,
+    columns: list[tuple[str, str, str]],
+    rows: list[dict[str, Any]],
+    default_sort: dict[str, str] | None = None,
+    actions: list[str] | None = None,
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": table_id,
+        "title": title,
+        "display": display,
+        "columns": [{"key": key, "label": label, "type": type_} for key, label, type_ in columns],
+        "rows": rows,
+        "default_sort": default_sort,
+        "actions": actions or [],
+        "warnings": warnings or [],
+    }
+
+
+def _limited_overlap_answer(total_rows: int, label: str, rows: list[dict[str, Any]]) -> str:
+    if total_rows > len(rows):
+        return f"Found {total_rows} {label}. Showing the top {len(rows)} by portfolio exposure."
+    return f"Found {total_rows} {label}."
+
+
+def _limit_warnings(total_rows: int) -> list[str]:
+    if total_rows <= MAX_OVERLAP_ROWS:
+        return []
+    return [f"Showing top {MAX_OVERLAP_ROWS} rows by exposure out of {total_rows} total matches."]
+
+
+def _enrichment_warnings(rows: list[dict[str, Any]]) -> list[str]:
+    issue_count = sum(1 for row in rows if row.get("status") in {"ambiguous", "not_found", "failed"})
+    if not issue_count:
+        return []
+    return [f"{issue_count} fund(s) could not be fully enriched, so overlap results may be incomplete."]
 
 
 def _asset_class_segregation_answer(question: str, context: dict[str, Any]) -> str | None:
@@ -198,6 +371,56 @@ def _sub_asset_parent_allocation_answer(
     )
 
 
+def _sub_asset_parent_percent_answer(
+    question: str,
+    plan: dict[str, Any],
+    context: dict[str, Any],
+) -> str | None:
+    normalized = question.lower()
+    if "allocation" not in normalized:
+        return None
+    if not any(term in normalized for term in ("%", "percent", "percentage", "terms")):
+        return None
+    if not any(term in normalized for term in ("equity", "debt", "hybrid", "asset")):
+        return None
+
+    sub_asset_class = _requested_sub_asset_class(plan, context, normalized)
+    parent_asset_class = _requested_parent_asset_class(plan, context, normalized, sub_asset_class)
+    if not sub_asset_class or not parent_asset_class:
+        return None
+
+    holder_names = _requested_holder_names(context, normalized)
+    if holder_names:
+        rows = []
+        for holder_name in holder_names:
+            sub_row = _matching_sub_asset_row(context, sub_asset_class, parent_asset_class, holder_name)
+            parent_row = _matching_parent_asset_row(context, parent_asset_class, holder_name)
+            if sub_row and parent_row:
+                rows.append(_sub_asset_percent_row(context, sub_row, parent_row, holder_name))
+    else:
+        sub_row = _matching_sub_asset_row(context, sub_asset_class, parent_asset_class, None)
+        parent_row = _matching_parent_asset_row(context, parent_asset_class, None)
+        rows = [_sub_asset_percent_row(context, sub_row, parent_row, None)] if sub_row and parent_row else []
+
+    rows = [row for row in rows if row is not None]
+    if not rows:
+        return None
+
+    show_overall = any(term in normalized for term in ("total asset", "total assets", "overall", "portfolio"))
+    parts = []
+    for row in rows:
+        holder_prefix = f"{row['holder_name']}: " if row.get("holder_name") else ""
+        text = (
+            f"{holder_prefix}{sub_asset_class} is {row['parent_percent']}% "
+            f"of {parent_asset_class}"
+        )
+        if show_overall:
+            text += f" and {row['overall_percent']}% of overall assets"
+        text += f" (current value {row['current_value']})."
+        parts.append(text)
+    return " ".join(parts)
+
+
 def _matching_parent_asset_row(
     context: dict[str, Any],
     asset_class: str,
@@ -216,6 +439,121 @@ def _matching_parent_asset_row(
 
     rows = (context.get("asset_allocations") or {}).get("rows") or []
     return next((row for row in rows if row.get("asset_class") == asset_class), None)
+
+
+def _matching_sub_asset_row(
+    context: dict[str, Any],
+    sub_asset_class: str,
+    parent_asset_class: str,
+    holder_name: Any,
+) -> dict[str, Any] | None:
+    dataset = context.get("sub_asset_allocations") or {}
+    rows = dataset.get("holder_rows") if isinstance(holder_name, str) else dataset.get("rows")
+    return next(
+        (
+            row
+            for row in rows or []
+            if row.get("sub_asset_class") == sub_asset_class
+            and row.get("asset_class") == parent_asset_class
+            and (not isinstance(holder_name, str) or row.get("holder_name") == holder_name)
+        ),
+        None,
+    )
+
+
+def _sub_asset_percent_row(
+    context: dict[str, Any],
+    sub_row: dict[str, Any] | None,
+    parent_row: dict[str, Any] | None,
+    holder_name: Any,
+) -> dict[str, Any] | None:
+    if not sub_row or not parent_row:
+        return None
+    sub_value = sub_row.get("current_value")
+    parent_value = parent_row.get("current_value")
+    if not isinstance(sub_value, (int, float)) or not isinstance(parent_value, (int, float)) or parent_value == 0:
+        return None
+    overall_total = _overall_current_value(context, holder_name)
+    if not overall_total:
+        return None
+    return {
+        "holder_name": holder_name if isinstance(holder_name, str) else None,
+        "current_value": sub_value,
+        "parent_percent": round(sub_value / parent_value * 100, 2),
+        "overall_percent": round(sub_value / overall_total * 100, 2),
+    }
+
+
+def _requested_sub_asset_class(
+    plan: dict[str, Any],
+    context: dict[str, Any],
+    normalized: str,
+) -> str | None:
+    filters = plan.get("filters") or {}
+    planned = filters.get("sub_asset_class")
+    if isinstance(planned, str):
+        return planned
+    rows = (context.get("sub_asset_allocations") or {}).get("rows") or []
+    return _find_named_row_value(rows, "sub_asset_class", normalized)
+
+
+def _requested_parent_asset_class(
+    plan: dict[str, Any],
+    context: dict[str, Any],
+    normalized: str,
+    sub_asset_class: str | None,
+) -> str | None:
+    filters = plan.get("filters") or {}
+    planned = filters.get("asset_class")
+    if isinstance(planned, str):
+        return planned
+    rows = (context.get("asset_allocations") or {}).get("rows") or []
+    explicit = _find_named_row_value(rows, "asset_class", normalized)
+    if explicit:
+        return explicit
+    if sub_asset_class:
+        sub_rows = (context.get("sub_asset_allocations") or {}).get("rows") or []
+        match = next((row for row in sub_rows if row.get("sub_asset_class") == sub_asset_class), None)
+        if match and isinstance(match.get("asset_class"), str):
+            return match["asset_class"]
+    return None
+
+
+def _requested_holder_names(context: dict[str, Any], normalized: str) -> list[str]:
+    rows = (context.get("holder_returns") or {}).get("rows") or []
+    holders = sorted({str(row.get("holder_name")) for row in rows if row.get("holder_name")})
+    return [holder for holder in holders if _holder_name_requested(holder, normalized)]
+
+
+def _holder_name_requested(holder_name: str, normalized: str) -> bool:
+    tokens = _simple_tokens(holder_name)
+    if not tokens:
+        return False
+    return any(token in _simple_tokens(normalized) for token in tokens if len(token) > 3)
+
+
+def _find_named_row_value(
+    rows: list[dict[str, Any]],
+    field: str,
+    normalized: str,
+) -> str | None:
+    normalized_tokens = set(_simple_tokens(normalized))
+    best: tuple[int, str] | None = None
+    for row in rows:
+        value = row.get(field)
+        if not isinstance(value, str):
+            continue
+        tokens = set(_simple_tokens(value))
+        if not tokens or not tokens.issubset(normalized_tokens):
+            continue
+        score = len(tokens)
+        if best is None or score > best[0]:
+            best = (score, value)
+    return best[1] if best else None
+
+
+def _simple_tokens(value: str) -> list[str]:
+    return [token for token in "".join(char.lower() if char.isalnum() else " " for char in value).split()]
 
 
 def _overall_current_value(context: dict[str, Any], holder_name: Any) -> float | None:
