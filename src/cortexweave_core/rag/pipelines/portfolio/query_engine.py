@@ -171,14 +171,17 @@ def _enrichment_answer(
                 actions=["csv_export"],
             )],
         }
-    if any(term in normalized for term in ("matrix", "pairwise", "fund overlap")):
-        dataset = context.get("fund_overlap_matrix") or {"rows": []}
-        all_rows = dataset.get("rows") or []
-        rows = all_rows[:MAX_OVERLAP_ROWS]
+    if _asks_for_fund_overlap(normalized):
+        equity_only = _asks_for_equity_funds(normalized)
+        all_rows = _fund_overlap_rows(context, equity_only=equity_only)
+        requested_limit = _requested_limit(normalized)
+        row_limit = requested_limit or MAX_OVERLAP_ROWS
+        rows = all_rows[:row_limit]
+        fund_scope = "equity mutual fund" if equity_only else "fund"
         return {
             "answer": _limited_overlap_answer(
                 len(all_rows),
-                "fund pair(s) with shared underlying stocks",
+                f"{fund_scope} pair(s) with shared underlying stocks",
                 rows,
             ),
             "intent": "fund_overlap_matrix",
@@ -198,12 +201,15 @@ def _enrichment_answer(
                 default_sort={"key": "shared_stocks", "direction": "desc"},
                 actions=["csv_export"],
                 warnings=_limit_warnings(len(all_rows), len(rows)),
+                total_rows=len(all_rows),
+                query_ref=_query_ref(question, knowledge_base_name, family_id) if requested_limit is None else None,
             )],
         }
-    if _asks_for_stock_overlap(normalized):
+    if _asks_for_security_exposure(normalized):
         requested_holders = _requested_holder_names(context, normalized)
         equity_only = _stock_overlap_equity_only(normalized)
-        all_rows = _stock_overlap_rows(context, requested_holders, equity_only=equity_only)
+        overlap_only = _asks_for_stock_overlap(normalized)
+        all_rows = _stock_overlap_rows(context, requested_holders, equity_only=equity_only, overlap_only=overlap_only)
         requested_limit = _requested_limit(normalized)
         row_limit = requested_limit or MAX_OVERLAP_ROWS
         rows = all_rows[:row_limit]
@@ -212,10 +218,10 @@ def _enrichment_answer(
         return {
             "answer": _limited_overlap_answer(
                 len(all_rows),
-                f"duplicated stock(s) across enriched mutual funds{holder_label}",
+                _security_exposure_label(equity_only=equity_only, overlap_only=overlap_only, holder_label=holder_label),
                 rows,
             ),
-            "intent": "stock_overlap",
+            "intent": "stock_overlap" if overlap_only else "security_exposure",
             "data": {
                 "datasets": {
                     "stock_overlap": {
@@ -230,7 +236,7 @@ def _enrichment_answer(
             "warnings": _enrichment_warnings((context.get("fund_resolution_status") or {}).get("rows") or []),
             "tables": [_table(
                 "stock_overlap",
-                "Duplicated Stock Exposure",
+                "Duplicated Stock Exposure" if overlap_only else "Underlying Security Exposure",
                 "modal",
                 [
                     ("stock_name", "Stock", "text"),
@@ -257,6 +263,51 @@ def _enrichment_answer(
     return None
 
 
+def _asks_for_fund_overlap(normalized: str) -> bool:
+    if any(term in normalized for term in ("matrix", "pairwise", "fund overlap")):
+        return True
+    security_terms = ("stock", "stocks", "security", "securities", "constituents", "underlying")
+    if any(term in normalized for term in security_terms):
+        return False
+    fund_terms = ("fund", "funds", "mutual fund", "mutual funds")
+    relation_terms = ("between", "among", "across", "compare")
+    overlap_terms = ("overlap", "common", "shared", "same")
+    return (
+        any(term in normalized for term in fund_terms)
+        and any(term in normalized for term in relation_terms)
+        and any(term in normalized for term in overlap_terms)
+    )
+
+
+def _asks_for_equity_funds(normalized: str) -> bool:
+    return "equity" in normalized and any(term in normalized for term in ("fund", "funds", "mutual fund", "mutual funds"))
+
+
+def _fund_overlap_rows(context: dict[str, Any], equity_only: bool = False) -> list[dict[str, Any]]:
+    if not equity_only:
+        return (context.get("fund_overlap_matrix") or {}).get("rows") or []
+
+    exposure_rows = (context.get("fund_stock_holdings") or {}).get("rows") or []
+    by_fund: dict[str, set[str]] = {}
+    for row in exposure_rows:
+        if row.get("asset_bucket") != "Equity":
+            continue
+        fund = row.get("matched_name") or row.get("scheme_name")
+        stock = row.get("stock_name")
+        if fund and stock:
+            by_fund.setdefault(str(fund), set()).add(str(stock))
+
+    funds = sorted(by_fund)
+    rows = []
+    for idx, fund_a in enumerate(funds):
+        for fund_b in funds[idx + 1:]:
+            shared = sorted(by_fund[fund_a] & by_fund[fund_b])
+            if shared:
+                rows.append({"fund_a": fund_a, "fund_b": fund_b, "shared_stocks": len(shared), "stocks": shared})
+    rows.sort(key=lambda row: row["shared_stocks"], reverse=True)
+    return rows
+
+
 def _asks_for_stock_overlap(normalized: str) -> bool:
     stock_terms = ("stock", "stocks", "security", "securities", "constituents", "holdings")
     overlap_terms = (
@@ -272,6 +323,27 @@ def _asks_for_stock_overlap(normalized: str) -> bool:
         "across my mutual funds",
     )
     return any(term in normalized for term in stock_terms) and any(term in normalized for term in overlap_terms)
+
+
+def _asks_for_security_exposure(normalized: str) -> bool:
+    if _asks_for_stock_overlap(normalized):
+        return True
+    security_terms = ("stock", "stocks", "security", "securities", "constituents", "underlying")
+    exposure_terms = ("combined exposure", "highest exposure", "top exposure", "portfolio exposure", "weighted exposure")
+    fund_scope_terms = ("mutual fund", "mutual funds", "fund holdings", "funds")
+    return (
+        any(term in normalized for term in security_terms)
+        and any(term in normalized for term in exposure_terms)
+        and any(term in normalized for term in fund_scope_terms)
+    )
+
+
+def _security_exposure_label(equity_only: bool, overlap_only: bool, holder_label: str) -> str:
+    if overlap_only:
+        noun = "duplicated stock(s)" if equity_only else "duplicated security/securities"
+    else:
+        noun = "stock(s)" if equity_only else "security/securities"
+    return f"{noun} across enriched mutual funds{holder_label}"
 
 
 def _stock_overlap_equity_only(normalized: str) -> bool:
@@ -290,6 +362,7 @@ def _stock_overlap_rows(
     context: dict[str, Any],
     holder_names: list[str],
     equity_only: bool = True,
+    overlap_only: bool = True,
 ) -> list[dict[str, Any]]:
     exposure_rows = (context.get("fund_stock_holdings") or {}).get("rows") or []
     if holder_names:
@@ -326,7 +399,7 @@ def _stock_overlap_rows(
     rows = []
     for row in grouped.values():
         row["fund_count"] = len(row["funds"])
-        if row["fund_count"] >= 2:
+        if not overlap_only or row["fund_count"] >= 2:
             row["aggregate_portfolio_exposure_percent"] = round(row["aggregate_portfolio_exposure_percent"], 4)
             row["aggregate_weighted_market_value"] = round(row["aggregate_weighted_market_value"], 2)
             rows.append(row)

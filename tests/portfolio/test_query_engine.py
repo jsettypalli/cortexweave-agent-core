@@ -108,6 +108,104 @@ def test_security_overlap_can_include_non_equity_holdings():
     assert result["tables"][0]["rows"][0]["stock_name"] == "Repo"
 
 
+def test_security_exposure_routes_combined_exposure_without_overlap_requirement():
+    rows = [
+        {
+            "stock_name": "Single Fund Bond",
+            "nature": "DEBT",
+            "matched_name": "Debt Fund A",
+            "portfolio_weighted_pct": 25,
+            "weighted_market_value": 2500,
+            "pct_of_fund_assets": 25,
+        },
+        {
+            "stock_name": "Shared Stock",
+            "nature": "EQUITY",
+            "matched_name": "Equity Fund A",
+            "portfolio_weighted_pct": 10,
+            "weighted_market_value": 1000,
+            "pct_of_fund_assets": 10,
+        },
+        {
+            "stock_name": "Shared Stock",
+            "nature": "EQUITY",
+            "matched_name": "Equity Fund B",
+            "portfolio_weighted_pct": 9,
+            "weighted_market_value": 900,
+            "pct_of_fund_assets": 9,
+        },
+    ]
+
+    result = _enrichment_answer(
+        "Which securities have the highest combined exposure across my mutual fund holdings?",
+        {
+            "fund_resolution_status": {"rows": []},
+            "fund_stock_holdings": {"rows": rows},
+            "holder_returns": {"rows": []},
+        },
+    )
+
+    dataset = result["data"]["datasets"]["stock_overlap"]
+    table = result["tables"][0]
+    assert result["intent"] == "security_exposure"
+    assert dataset["matched_rows"] == 2
+    assert dataset["nature"] is None
+    assert table["title"] == "Underlying Security Exposure"
+    assert table["rows"][0]["stock_name"] == "Single Fund Bond"
+    assert table["rows"][0]["fund_count"] == 1
+
+
+def test_fund_overlap_respects_top_limit():
+    rows = [
+        {"fund_a": f"Fund {idx:02d}A", "fund_b": f"Fund {idx:02d}B", "shared_stocks": 100 - idx, "stocks": ["A", "B"]}
+        for idx in range(12)
+    ]
+
+    result = _enrichment_answer(
+        "Show top 10 fund overlap by underlying stocks, sorted by highest portfolio exposure.",
+        {
+            "fund_resolution_status": {"rows": []},
+            "fund_overlap_matrix": {"rows": rows},
+        },
+    )
+
+    dataset = result["data"]["datasets"]["fund_overlap_matrix"]
+    table = result["tables"][0]
+    assert result["intent"] == "fund_overlap_matrix"
+    assert dataset["matched_rows"] == 10
+    assert dataset["total_rows"] == 12
+    assert len(table["rows"]) == 10
+    assert table["warnings"] == ["Showing top 10 rows by exposure out of 12 total matches."]
+    assert table["query_ref"] is None
+
+
+def test_fund_overlap_understands_between_equity_mutual_funds():
+    rows = [
+        {"scheme_name": "Equity Fund A", "asset_bucket": "Equity", "stock_name": "Stock 1"},
+        {"scheme_name": "Equity Fund A", "asset_bucket": "Equity", "stock_name": "Stock 2"},
+        {"scheme_name": "Equity Fund B", "asset_bucket": "Equity", "stock_name": "Stock 1"},
+        {"scheme_name": "Equity Fund C", "asset_bucket": "Equity", "stock_name": "Stock 2"},
+        {"scheme_name": "Debt Fund A", "asset_bucket": "Debt", "stock_name": "Stock 1"},
+        {"scheme_name": "Debt Fund A", "asset_bucket": "Debt", "stock_name": "Stock 2"},
+    ]
+
+    result = _enrichment_answer(
+        "Compare top 10 overlap between my equity mutual funds.",
+        {
+            "fund_resolution_status": {"rows": []},
+            "fund_stock_holdings": {"rows": rows},
+            "fund_overlap_matrix": {"rows": []},
+        },
+    )
+
+    table = result["tables"][0]
+    assert result["intent"] == "fund_overlap_matrix"
+    assert result["answer"] == "Found 2 equity mutual fund pair(s) with shared underlying stocks."
+    assert len(table["rows"]) == 2
+    assert table["query_ref"] is None
+    assert all("Debt Fund A" not in {row["fund_a"], row["fund_b"]} for row in table["rows"])
+
+
 def test_highest_and_lowest_xirr_route_to_mutual_fund_holdings():
     context = {
         "mutual_fund_holdings": {
