@@ -238,26 +238,56 @@ def sector_overlap(reports: list[PortfolioReport]) -> dict:
 
 
 def fund_overlap_matrix(reports: list[PortfolioReport]) -> dict:
-    by_fund: dict[str, set[str]] = defaultdict(set)
+    by_fund: dict[str, dict[str, dict]] = defaultdict(dict)
     for row in fund_stock_holdings(reports)["rows"]:
         fund = row.get("matched_name") or row.get("scheme_name")
         stock = row.get("stock_name")
         if fund and stock:
-            by_fund[str(fund)].add(str(stock))
+            target = by_fund[str(fund)].setdefault(str(stock), {
+                "name": str(stock),
+                "combined_portfolio_exposure_percent": 0.0,
+                "combined_fund_allocation_percent": 0.0,
+                "combined_weighted_market_value": 0.0,
+            })
+            target["combined_portfolio_exposure_percent"] += float(row.get("portfolio_weighted_pct") or 0)
+            target["combined_fund_allocation_percent"] += float(row.get("pct_of_fund_assets") or 0)
+            target["combined_weighted_market_value"] += float(row.get("weighted_market_value") or 0)
     funds = sorted(by_fund)
     rows = []
     for i, fund_a in enumerate(funds):
         for fund_b in funds[i + 1:]:
-            shared = sorted(by_fund[fund_a] & by_fund[fund_b])
-            if not shared:
+            shared_names = sorted(set(by_fund[fund_a]) & set(by_fund[fund_b]))
+            if not shared_names:
                 continue
+            shared = []
+            for stock in shared_names:
+                fund_a_metrics = by_fund[fund_a][stock]
+                fund_b_metrics = by_fund[fund_b][stock]
+                shared.append({
+                    "name": stock,
+                    "combined_portfolio_exposure_percent": round(
+                        fund_a_metrics["combined_portfolio_exposure_percent"] + fund_b_metrics["combined_portfolio_exposure_percent"],
+                        4,
+                    ),
+                    "combined_fund_allocation_percent": round(
+                        fund_a_metrics["combined_fund_allocation_percent"] + fund_b_metrics["combined_fund_allocation_percent"],
+                        4,
+                    ),
+                    "combined_weighted_market_value": round(
+                        fund_a_metrics["combined_weighted_market_value"] + fund_b_metrics["combined_weighted_market_value"],
+                        2,
+                    ),
+                })
+            shared.sort(key=lambda item: (item["combined_portfolio_exposure_percent"], item["combined_weighted_market_value"]), reverse=True)
             rows.append({
                 "fund_a": fund_a,
                 "fund_b": fund_b,
                 "shared_stocks": len(shared),
+                "shared_portfolio_exposure_percent": round(sum(item["combined_portfolio_exposure_percent"] for item in shared), 4),
+                "shared_weighted_market_value": round(sum(item["combined_weighted_market_value"] for item in shared), 2),
                 "stocks": shared,
             })
-    rows.sort(key=lambda row: row["shared_stocks"], reverse=True)
+    rows.sort(key=lambda row: (row["shared_portfolio_exposure_percent"], row["shared_stocks"]), reverse=True)
     return {"rows": rows, "totals": {"pairs_with_overlap": len(rows)}}
 
 

@@ -208,7 +208,16 @@ def test_security_exposure_routes_combined_exposure_without_overlap_requirement(
 
 def test_fund_overlap_respects_top_limit():
     rows = [
-        {"fund_a": f"Fund {idx:02d}A", "fund_b": f"Fund {idx:02d}B", "shared_stocks": 100 - idx, "stocks": ["A", "B"]}
+        {
+            "fund_a": f"Fund {idx:02d}A",
+            "fund_b": f"Fund {idx:02d}B",
+            "shared_stocks": 100 - idx,
+            "shared_portfolio_exposure_percent": 100 - idx,
+            "stocks": [
+                {"name": f"Stock {stock_idx:02d}", "combined_portfolio_exposure_percent": 20 - stock_idx}
+                for stock_idx in range(12)
+            ],
+        }
         for idx in range(12)
     ]
 
@@ -225,8 +234,13 @@ def test_fund_overlap_respects_top_limit():
     assert result["intent"] == "fund_overlap_matrix"
     assert dataset["matched_rows"] == 10
     assert dataset["total_rows"] == 12
+    assert len(dataset["rows"][0]["stocks"]) == 10
     assert len(table["rows"]) == 10
-    assert table["warnings"] == ["Showing top 10 rows by exposure out of 12 total matches."]
+    assert len(table["rows"][0]["stocks"]) == 10
+    assert table["warnings"] == [
+        "Showing top 10 rows by exposure out of 12 total matches.",
+        "Shared stock lists are capped to top 10 by portfolio exposure in this view.",
+    ]
     assert table["query_ref"] is None
 
 

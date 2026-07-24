@@ -16,6 +16,7 @@ from cortexweave_core.utils.config_loader import config
 
 DEFAULT_OVERLAP_ROWS = 10
 MAX_REQUESTED_OVERLAP_ROWS = 100
+DEFAULT_SHARED_STOCKS_PER_PAIR = 10
 
 
 def build_portfolio_context(reports: list[PortfolioReport]) -> dict[str, Any]:
@@ -178,15 +179,16 @@ def _enrichment_answer(
         requested_limit = _requested_limit(normalized)
         row_limit = requested_limit or DEFAULT_OVERLAP_ROWS
         rows = all_rows[:row_limit]
+        response_rows = _compact_fund_overlap_rows(rows)
         fund_scope = "equity mutual fund" if equity_only else "fund"
         return {
             "answer": _limited_overlap_answer(
                 len(all_rows),
                 f"{fund_scope} pair(s) with shared underlying stocks",
-                rows,
+                response_rows,
             ),
             "intent": "fund_overlap_matrix",
-            "data": {"datasets": {"fund_overlap_matrix": {"rows": rows, "matched_rows": len(rows), "total_rows": len(all_rows)}}},
+            "data": {"datasets": {"fund_overlap_matrix": {"rows": response_rows, "matched_rows": len(response_rows), "total_rows": len(all_rows)}}},
             "warnings": _enrichment_warnings((context.get("fund_resolution_status") or {}).get("rows") or []),
             "tables": [_table(
                 "fund_overlap_matrix",
@@ -196,14 +198,16 @@ def _enrichment_answer(
                     ("fund_a", "Fund A", "text"),
                     ("fund_b", "Fund B", "text"),
                     ("shared_stocks", "Shared Stocks", "number"),
+                    ("shared_portfolio_exposure_percent", "Shared Exposure", "percent"),
+                    ("shared_weighted_market_value", "Shared Value", "currency"),
                     ("stocks", "Stocks", "list"),
                 ],
-                rows,
-                default_sort={"key": "shared_stocks", "direction": "desc"},
+                response_rows,
+                default_sort={"key": "shared_portfolio_exposure_percent", "direction": "desc"},
                 actions=["csv_export"],
-                warnings=_limit_warnings(len(all_rows), len(rows)),
+                warnings=_fund_overlap_warnings(len(all_rows), len(rows), requested_limit is None),
                 total_rows=len(all_rows),
-                query_ref=_query_ref(question, knowledge_base_name, family_id) if requested_limit is None else None,
+                query_ref=_query_ref(question, knowledge_base_name, family_id),
             )],
         }
     if _asks_for_security_exposure(normalized):
@@ -289,24 +293,60 @@ def _fund_overlap_rows(context: dict[str, Any], equity_only: bool = False) -> li
         return (context.get("fund_overlap_matrix") or {}).get("rows") or []
 
     exposure_rows = (context.get("fund_stock_holdings") or {}).get("rows") or []
-    by_fund: dict[str, set[str]] = {}
+    by_fund: dict[str, dict[str, dict[str, Any]]] = {}
     for row in exposure_rows:
         if row.get("asset_bucket") != "Equity":
             continue
         fund = row.get("matched_name") or row.get("scheme_name")
         stock = row.get("stock_name")
         if fund and stock:
-            by_fund.setdefault(str(fund), set()).add(str(stock))
+            target = by_fund.setdefault(str(fund), {}).setdefault(str(stock), {
+                "combined_portfolio_exposure_percent": 0.0,
+                "combined_fund_allocation_percent": 0.0,
+                "combined_weighted_market_value": 0.0,
+            })
+            target["combined_portfolio_exposure_percent"] += float(row.get("portfolio_weighted_pct") or 0)
+            target["combined_fund_allocation_percent"] += float(row.get("pct_of_fund_assets") or 0)
+            target["combined_weighted_market_value"] += float(row.get("weighted_market_value") or 0)
 
     funds = sorted(by_fund)
     rows = []
     for idx, fund_a in enumerate(funds):
         for fund_b in funds[idx + 1:]:
-            shared = sorted(by_fund[fund_a] & by_fund[fund_b])
+            shared_names = sorted(set(by_fund[fund_a]) & set(by_fund[fund_b]))
+            shared = []
+            for stock in shared_names:
+                fund_a_metrics = by_fund[fund_a][stock]
+                fund_b_metrics = by_fund[fund_b][stock]
+                shared.append({
+                    "name": stock,
+                    "combined_portfolio_exposure_percent": round(fund_a_metrics["combined_portfolio_exposure_percent"] + fund_b_metrics["combined_portfolio_exposure_percent"], 4),
+                    "combined_fund_allocation_percent": round(fund_a_metrics["combined_fund_allocation_percent"] + fund_b_metrics["combined_fund_allocation_percent"], 4),
+                    "combined_weighted_market_value": round(fund_a_metrics["combined_weighted_market_value"] + fund_b_metrics["combined_weighted_market_value"], 2),
+                })
+            shared.sort(key=lambda item: (item["combined_portfolio_exposure_percent"], item["combined_weighted_market_value"]), reverse=True)
             if shared:
-                rows.append({"fund_a": fund_a, "fund_b": fund_b, "shared_stocks": len(shared), "stocks": shared})
-    rows.sort(key=lambda row: row["shared_stocks"], reverse=True)
+                rows.append({
+                    "fund_a": fund_a,
+                    "fund_b": fund_b,
+                    "shared_stocks": len(shared),
+                    "shared_portfolio_exposure_percent": round(sum(item["combined_portfolio_exposure_percent"] for item in shared), 4),
+                    "shared_weighted_market_value": round(sum(item["combined_weighted_market_value"] for item in shared), 2),
+                    "stocks": shared,
+                })
+    rows.sort(key=lambda row: (row["shared_portfolio_exposure_percent"], row["shared_stocks"]), reverse=True)
     return rows
+
+
+def _compact_fund_overlap_rows(rows: list[dict[str, Any]], stock_limit: int = DEFAULT_SHARED_STOCKS_PER_PAIR) -> list[dict[str, Any]]:
+    compacted = []
+    for row in rows:
+        next_row = {**row}
+        stocks = row.get("stocks")
+        if isinstance(stocks, list) and len(stocks) > stock_limit:
+            next_row["stocks"] = stocks[:stock_limit]
+        compacted.append(next_row)
+    return compacted
 
 
 def _asks_for_stock_overlap(normalized: str) -> bool:
@@ -450,6 +490,12 @@ def _limit_warnings(total_rows: int, shown_rows: int = DEFAULT_OVERLAP_ROWS) -> 
     if total_rows <= shown_rows:
         return []
     return [f"Showing top {shown_rows} rows by exposure out of {total_rows} total matches."]
+
+
+def _fund_overlap_warnings(total_rows: int, shown_rows: int, can_load_full_table: bool) -> list[str]:
+    warnings = _table_scope_warnings(total_rows, shown_rows) if can_load_full_table else _limit_warnings(total_rows, shown_rows)
+    warnings.append(f"Shared stock lists are capped to top {DEFAULT_SHARED_STOCKS_PER_PAIR} by portfolio exposure in this view.")
+    return warnings
 
 
 def _table_scope_warnings(total_rows: int, highlighted_rows: int) -> list[str]:

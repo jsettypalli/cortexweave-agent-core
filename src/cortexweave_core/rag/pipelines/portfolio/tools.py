@@ -11,6 +11,11 @@ from cortexweave_core.rag.pipelines.portfolio.query_engine import (
 )
 from cortexweave_core.utils.config_loader import config
 
+DEFAULT_DIRECT_TOOL_ROW_LIMIT = 10
+MAX_DIRECT_TOOL_ROW_LIMIT = 100
+DEFAULT_DIRECT_TOOL_NESTED_LIMIT = 10
+MAX_DIRECT_TOOL_NESTED_LIMIT = 25
+
 
 def _config_or_raise(key: str) -> str:
     value = config.get(key)
@@ -47,6 +52,80 @@ def _run(analytics_fn: Callable[[list[PortfolioReport]], dict]) -> dict:
     if not reports:
         return _not_found(knowledge_base_name, family_id)
     return analytics_fn(reports)
+
+
+def _bounded_limit(value: int | None, default: int, maximum: int) -> int:
+    if value is None or value <= 0:
+        return default
+    return min(value, maximum)
+
+
+def _compact_sequence(values: object, limit: int) -> list:
+    if not isinstance(values, list):
+        return []
+    return values[:limit]
+
+
+def _compact_fund_overlap_result(
+    result: dict,
+    *,
+    row_limit: int,
+    stock_limit: int,
+) -> dict:
+    rows = list(result.get("rows") or [])
+    compact_rows = []
+    for row in rows[:row_limit]:
+        compact = dict(row)
+        compact["stocks"] = _compact_sequence(compact.get("stocks"), stock_limit)
+        compact_rows.append(compact)
+
+    totals = dict(result.get("totals") or {})
+    totals["total_rows"] = len(rows)
+    totals["returned_rows"] = len(compact_rows)
+    totals["stocks_returned_per_pair"] = stock_limit
+
+    warnings = list(result.get("warnings") or [])
+    if len(rows) > len(compact_rows):
+        warnings.append(
+            f"Direct tool output is capped to {len(compact_rows)} rows out of {len(rows)} total matches."
+        )
+    if any(isinstance(row.get("stocks"), list) and len(row["stocks"]) > stock_limit for row in rows[:row_limit]):
+        warnings.append(
+            f"Shared stock lists are capped to top {stock_limit} by portfolio exposure per fund pair."
+        )
+
+    return {"rows": compact_rows, "totals": totals, "warnings": warnings}
+
+
+def _compact_stock_overlap_result(
+    result: dict,
+    *,
+    row_limit: int,
+    fund_limit: int,
+) -> dict:
+    rows = list(result.get("rows") or [])
+    compact_rows = []
+    for row in rows[:row_limit]:
+        compact = dict(row)
+        compact["funds"] = _compact_sequence(compact.get("funds"), fund_limit)
+        compact_rows.append(compact)
+
+    totals = dict(result.get("totals") or {})
+    totals["total_rows"] = len(rows)
+    totals["returned_rows"] = len(compact_rows)
+    totals["funds_returned_per_stock"] = fund_limit
+
+    warnings = list(result.get("warnings") or [])
+    if len(rows) > len(compact_rows):
+        warnings.append(
+            f"Direct tool output is capped to {len(compact_rows)} rows out of {len(rows)} total matches."
+        )
+    if any(isinstance(row.get("funds"), list) and len(row["funds"]) > fund_limit for row in rows[:row_limit]):
+        warnings.append(
+            f"Fund lists are capped to top {fund_limit} entries per stock in direct tool output."
+        )
+
+    return {"rows": compact_rows, "totals": totals, "warnings": warnings}
 
 
 async def answer_portfolio_query(question: str) -> dict:
@@ -357,15 +436,27 @@ async def get_fund_stock_holdings(
     }, "rows": rows, "totals": result.get("totals")}
 
 
-async def get_stock_overlap(min_fund_count: int = 2) -> dict:
+async def get_stock_overlap(
+    min_fund_count: int = 2,
+    limit: int | None = None,
+    fund_limit: int | None = None,
+) -> dict:
     """
     Returns stocks duplicated across enriched mutual funds, with aggregate
     portfolio-weighted exposure and contributing funds.
+
+    Prefer `answer_portfolio_query` for user-facing answers. This direct tool is
+    compacted by default to avoid sending large overlap tables to the LLM.
     """
     reports, knowledge_base_name, family_id = await asyncio.to_thread(_load_reports)
     if not reports:
         return _not_found(knowledge_base_name, family_id)
-    return analytics.stock_overlap(reports, min_fund_count=max(1, min_fund_count))
+    result = analytics.stock_overlap(reports, min_fund_count=max(1, min_fund_count))
+    return _compact_stock_overlap_result(
+        result,
+        row_limit=_bounded_limit(limit, DEFAULT_DIRECT_TOOL_ROW_LIMIT, MAX_DIRECT_TOOL_ROW_LIMIT),
+        fund_limit=_bounded_limit(fund_limit, DEFAULT_DIRECT_TOOL_NESTED_LIMIT, MAX_DIRECT_TOOL_NESTED_LIMIT),
+    )
 
 
 async def get_sector_overlap() -> dict:
@@ -375,11 +466,20 @@ async def get_sector_overlap() -> dict:
     return await asyncio.to_thread(_run, analytics.sector_overlap)
 
 
-async def get_fund_overlap_matrix() -> dict:
+async def get_fund_overlap_matrix(limit: int | None = None, stock_limit: int | None = None) -> dict:
     """
     Returns pairwise mutual-fund overlap based on shared underlying stocks.
+
+    Prefer `answer_portfolio_query` for user-facing answers. This direct tool
+    returns only a compact preview by default; totals indicate how many matches
+    exist in the full matrix.
     """
-    return await asyncio.to_thread(_run, analytics.fund_overlap_matrix)
+    result = await asyncio.to_thread(_run, analytics.fund_overlap_matrix)
+    return _compact_fund_overlap_result(
+        result,
+        row_limit=_bounded_limit(limit, DEFAULT_DIRECT_TOOL_ROW_LIMIT, MAX_DIRECT_TOOL_ROW_LIMIT),
+        stock_limit=_bounded_limit(stock_limit, DEFAULT_DIRECT_TOOL_NESTED_LIMIT, MAX_DIRECT_TOOL_NESTED_LIMIT),
+    )
 
 
 def _matches_contains(row_value: str | None, requested_value: str | None, alternate_value: str | None = None) -> bool:
