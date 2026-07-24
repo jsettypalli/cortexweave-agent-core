@@ -72,6 +72,57 @@ def test_stock_overlap_understands_more_than_one_fund_holder_and_top_limit():
     assert "Repo" not in {row["stock_name"] for row in table_rows}
 
 
+def test_stock_overlap_keeps_default_payload_capped_for_llm_usage():
+    rows = []
+    for idx in range(60):
+        for fund in ("Fund A", "Fund B"):
+            rows.append({
+                "stock_name": f"Stock {idx:02d}",
+                "nature": "EQUITY",
+                "matched_name": fund,
+                "portfolio_weighted_pct": 100 - idx,
+                "weighted_market_value": 1000 - idx,
+                "pct_of_fund_assets": 5,
+            })
+
+    result = _enrichment_answer(
+        "Show me overlapping stock holdings across my mutual funds",
+        {
+            "fund_resolution_status": {"rows": []},
+            "fund_stock_holdings": {"rows": rows},
+            "holder_returns": {"rows": []},
+        },
+        knowledge_base_name="kb",
+        family_id="family",
+    )
+
+    dataset = result["data"]["datasets"]["stock_overlap"]
+    table = result["tables"][0]
+    assert dataset["matched_rows"] == 10
+    assert dataset["total_rows"] == 60
+    assert len(dataset["rows"]) == 10
+    assert len(table["rows"]) == 10
+    assert table["query_ref"] is not None
+
+    top_result = _enrichment_answer(
+        "Show me top 25 overlapping stock holdings across my mutual funds",
+        {
+            "fund_resolution_status": {"rows": []},
+            "fund_stock_holdings": {"rows": rows},
+            "holder_returns": {"rows": []},
+        },
+        knowledge_base_name="kb",
+        family_id="family",
+    )
+
+    top_dataset = top_result["data"]["datasets"]["stock_overlap"]
+    top_table = top_result["tables"][0]
+    assert top_dataset["matched_rows"] == 25
+    assert len(top_dataset["rows"]) == 25
+    assert len(top_table["rows"]) == 25
+    assert top_table["query_ref"] is None
+
+
 def test_security_overlap_can_include_non_equity_holdings():
     fatema = "Ms. ROOWALLA FATEMA SULEMANJI"
     rows = [

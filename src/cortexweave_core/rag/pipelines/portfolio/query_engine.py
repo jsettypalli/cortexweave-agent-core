@@ -14,7 +14,8 @@ from cortexweave_core.rag.pipelines.portfolio.planner import (
 )
 from cortexweave_core.utils.config_loader import config
 
-MAX_OVERLAP_ROWS = 50
+DEFAULT_OVERLAP_ROWS = 10
+MAX_REQUESTED_OVERLAP_ROWS = 100
 
 
 def build_portfolio_context(reports: list[PortfolioReport]) -> dict[str, Any]:
@@ -175,7 +176,7 @@ def _enrichment_answer(
         equity_only = _asks_for_equity_funds(normalized)
         all_rows = _fund_overlap_rows(context, equity_only=equity_only)
         requested_limit = _requested_limit(normalized)
-        row_limit = requested_limit or MAX_OVERLAP_ROWS
+        row_limit = requested_limit or DEFAULT_OVERLAP_ROWS
         rows = all_rows[:row_limit]
         fund_scope = "equity mutual fund" if equity_only else "fund"
         return {
@@ -211,7 +212,7 @@ def _enrichment_answer(
         overlap_only = _asks_for_stock_overlap(normalized)
         all_rows = _stock_overlap_rows(context, requested_holders, equity_only=equity_only, overlap_only=overlap_only)
         requested_limit = _requested_limit(normalized)
-        row_limit = requested_limit or MAX_OVERLAP_ROWS
+        row_limit = requested_limit or DEFAULT_OVERLAP_ROWS
         rows = all_rows[:row_limit]
         can_load_full_table = requested_limit is None
         holder_label = f" for {', '.join(requested_holders)}" if requested_holders else ""
@@ -355,7 +356,7 @@ def _requested_limit(normalized: str) -> int | None:
     match = re.search(r"\btop\s+(\d{1,3})\b", normalized)
     if not match:
         return None
-    return max(1, min(int(match.group(1)), MAX_OVERLAP_ROWS))
+    return max(1, min(int(match.group(1)), MAX_REQUESTED_OVERLAP_ROWS))
 
 
 def _stock_overlap_rows(
@@ -445,7 +446,7 @@ def _limited_overlap_answer(total_rows: int, label: str, rows: list[dict[str, An
     return f"Found {total_rows} {label}."
 
 
-def _limit_warnings(total_rows: int, shown_rows: int = MAX_OVERLAP_ROWS) -> list[str]:
+def _limit_warnings(total_rows: int, shown_rows: int = DEFAULT_OVERLAP_ROWS) -> list[str]:
     if total_rows <= shown_rows:
         return []
     return [f"Showing top {shown_rows} rows by exposure out of {total_rows} total matches."]
