@@ -126,7 +126,12 @@ def _compact_fund_overlap_result(
             f"Shared stock lists are capped to top {stock_limit} by portfolio exposure per fund pair."
         )
 
-    return {"rows": compact_rows, "totals": totals, "warnings": warnings}
+    return {
+        "rows": compact_rows,
+        "totals": totals,
+        "warnings": warnings,
+        "exposure": result.get("exposure"),
+    }
 
 
 def _compact_stock_overlap_result(
@@ -157,7 +162,12 @@ def _compact_stock_overlap_result(
             f"Fund lists are capped to top {fund_limit} entries per stock in direct tool output."
         )
 
-    return {"rows": compact_rows, "totals": totals, "warnings": warnings}
+    return {
+        "rows": compact_rows,
+        "totals": totals,
+        "warnings": warnings,
+        "exposure": result.get("exposure"),
+    }
 
 
 def _json_size(value: object) -> int:

@@ -154,12 +154,23 @@ def _enrichment_answer(
             )],
         }
     if any(term in normalized for term in ("sector", "industry", "concentration")) and any(term in normalized for term in ("overlap", "exposure", "concentration", "duplicated", "duplicate")):
-        dataset = context.get("sector_overlap") or {"rows": []}
-        rows = dataset.get("rows") or []
+        requested_holders = _requested_holder_names(context, normalized)
+        exposure_rows, denominator, exposure = _exposure_scope(context, requested_holders)
+        rows = (
+            analytics.sector_overlap_rows(exposure_rows, denominator)
+            if requested_holders
+            else (context.get("sector_overlap") or {}).get("rows") or []
+        )
+        holder_label = f" for {', '.join(requested_holders)}" if requested_holders else ""
         return {
-            "answer": f"Found sector exposure across {len(rows)} sector(s).",
+            "answer": f"Found sector exposure across {len(rows)} sector(s){holder_label}.",
             "intent": "sector_overlap",
-            "data": {"datasets": {"sector_overlap": {"rows": rows, "matched_rows": len(rows)}}},
+            "data": {"datasets": {"sector_overlap": {
+                "rows": rows,
+                "matched_rows": len(rows),
+                "holder_names": requested_holders,
+                "exposure": exposure,
+            }}},
             "warnings": _enrichment_warnings((context.get("fund_resolution_status") or {}).get("rows") or []),
             "tables": [_table(
                 "sector_overlap",
@@ -179,15 +190,22 @@ def _enrichment_answer(
                 row_key_fields=["sector"],
                 rows_complete=True,
                 nested_fields={"top_contributing_funds": {"initial_limit": 5}},
+                exposure=exposure,
             )],
         }
     if _asks_for_fund_overlap(normalized):
         requested_holders = _requested_holder_names(context, normalized)
+        _, _, exposure = _exposure_scope(context, requested_holders)
         equity_only = _asks_for_equity_funds(normalized)
+        stock_only = (
+            _asks_for_stock_instruments(normalized)
+            or (equity_only and not _asks_for_all_instruments(normalized))
+        )
         all_rows = _fund_overlap_rows(
             context,
             requested_holders,
             equity_only=equity_only,
+            stock_only=stock_only,
         )
         requested_limit = _requested_limit(normalized)
         row_limit = requested_limit or DEFAULT_OVERLAP_ROWS
@@ -207,6 +225,7 @@ def _enrichment_answer(
                 "matched_rows": len(response_rows),
                 "total_rows": len(all_rows),
                 "holder_names": requested_holders,
+                "exposure": exposure,
             }}},
             "warnings": _enrichment_warnings((context.get("fund_resolution_status") or {}).get("rows") or []),
             "tables": [_table(
@@ -230,10 +249,12 @@ def _enrichment_answer(
                 row_key_fields=["fund_a", "fund_b"],
                 rows_complete=requested_limit is not None or len(rows) >= len(all_rows),
                 nested_fields={"stocks": {"initial_limit": 0, "total_key": "shared_stocks"}},
+                exposure=exposure,
             )],
         }
     if _asks_for_security_exposure(normalized):
         requested_holders = _requested_holder_names(context, normalized)
+        _, _, exposure = _exposure_scope(context, requested_holders)
         equity_only = _stock_overlap_equity_only(normalized)
         overlap_only = _asks_for_stock_overlap(normalized)
         all_rows = _stock_overlap_rows(context, requested_holders, equity_only=equity_only, overlap_only=overlap_only)
@@ -257,6 +278,7 @@ def _enrichment_answer(
                         "total_rows": len(all_rows),
                         "holder_names": requested_holders,
                         "nature": "EQUITY" if equity_only else None,
+                        "exposure": exposure,
                     }
                 }
             },
@@ -288,6 +310,7 @@ def _enrichment_answer(
                 row_key_fields=["stock_name"],
                 rows_complete=requested_limit is not None or len(rows) >= len(all_rows),
                 nested_fields={"funds": {"initial_limit": 3, "total_key": "fund_count"}},
+                exposure=exposure,
             )],
         }
     return None
@@ -313,60 +336,35 @@ def _asks_for_equity_funds(normalized: str) -> bool:
     return "equity" in normalized and any(term in normalized for term in ("fund", "funds", "mutual fund", "mutual funds"))
 
 
+def _asks_for_stock_instruments(normalized: str) -> bool:
+    return re.search(r"\bstocks?\b", normalized) is not None
+
+
+def _asks_for_all_instruments(normalized: str) -> bool:
+    return any(term in normalized for term in (
+        "all securities",
+        "all instruments",
+        "all underlying",
+        "all holdings",
+    ))
+
+
 def _fund_overlap_rows(
     context: dict[str, Any],
     holder_names: list[str] | None = None,
     equity_only: bool = False,
+    stock_only: bool = False,
 ) -> list[dict[str, Any]]:
-    if not equity_only and not holder_names:
+    exposure_rows = (context.get("fund_stock_holdings") or {}).get("rows") or []
+    if not equity_only and not holder_names and (not stock_only or not exposure_rows):
         return (context.get("fund_overlap_matrix") or {}).get("rows") or []
 
-    exposure_rows = (context.get("fund_stock_holdings") or {}).get("rows") or []
-    by_fund: dict[str, dict[str, dict[str, Any]]] = {}
-    for row in exposure_rows:
-        if holder_names and row.get("holder_name") not in holder_names:
-            continue
-        if equity_only and row.get("asset_bucket") != "Equity":
-            continue
-        fund = row.get("matched_name") or row.get("scheme_name")
-        stock = row.get("stock_name")
-        if fund and stock:
-            target = by_fund.setdefault(str(fund), {}).setdefault(str(stock), {
-                "combined_portfolio_exposure_percent": 0.0,
-                "combined_fund_allocation_percent": 0.0,
-                "combined_weighted_market_value": 0.0,
-            })
-            target["combined_portfolio_exposure_percent"] += float(row.get("portfolio_weighted_pct") or 0)
-            target["combined_fund_allocation_percent"] += float(row.get("pct_of_fund_assets") or 0)
-            target["combined_weighted_market_value"] += float(row.get("weighted_market_value") or 0)
-
-    funds = sorted(by_fund)
-    rows = []
-    for idx, fund_a in enumerate(funds):
-        for fund_b in funds[idx + 1:]:
-            shared_names = sorted(set(by_fund[fund_a]) & set(by_fund[fund_b]))
-            shared = []
-            for stock in shared_names:
-                fund_a_metrics = by_fund[fund_a][stock]
-                fund_b_metrics = by_fund[fund_b][stock]
-                shared.append({
-                    "name": stock,
-                    "combined_portfolio_exposure_percent": round(fund_a_metrics["combined_portfolio_exposure_percent"] + fund_b_metrics["combined_portfolio_exposure_percent"], 4),
-                    "combined_fund_allocation_percent": round(fund_a_metrics["combined_fund_allocation_percent"] + fund_b_metrics["combined_fund_allocation_percent"], 4),
-                    "combined_weighted_market_value": round(fund_a_metrics["combined_weighted_market_value"] + fund_b_metrics["combined_weighted_market_value"], 2),
-                })
-            shared.sort(key=lambda item: (item["combined_portfolio_exposure_percent"], item["combined_weighted_market_value"]), reverse=True)
-            if shared:
-                rows.append({
-                    "fund_a": fund_a,
-                    "fund_b": fund_b,
-                    "shared_stocks": len(shared),
-                    "shared_portfolio_exposure_percent": round(sum(item["combined_portfolio_exposure_percent"] for item in shared), 4),
-                    "shared_weighted_market_value": round(sum(item["combined_weighted_market_value"] for item in shared), 2),
-                    "stocks": shared,
-                })
-    rows.sort(key=lambda row: (row["shared_portfolio_exposure_percent"], row["shared_stocks"]), reverse=True)
-    return rows
+    exposure_rows, denominator, _ = _exposure_scope(context, holder_names or [])
+    if equity_only:
+        exposure_rows = [row for row in exposure_rows if row.get("asset_bucket") == "Equity"]
+    if stock_only:
+        exposure_rows = [row for row in exposure_rows if row.get("nature") == "EQUITY"]
+    return analytics.fund_overlap_rows(exposure_rows, denominator)
 
 
 def _compact_fund_overlap_rows(rows: list[dict[str, Any]], stock_limit: int = DEFAULT_SHARED_STOCKS_PER_PAIR) -> list[dict[str, Any]]:
@@ -444,39 +442,12 @@ def _stock_overlap_rows(
     if not exposure_rows:
         return []
 
-    grouped: dict[str, dict[str, Any]] = {}
-    for exposure in exposure_rows:
-        stock = exposure.get("stock_name")
-        if not stock:
-            continue
-        target = grouped.setdefault(str(stock), {
-            "stock_name": stock,
-            "sector": exposure.get("sector"),
-            "nature": exposure.get("nature"),
-            "funds": [],
-            "aggregate_portfolio_exposure_percent": 0.0,
-            "aggregate_weighted_market_value": 0.0,
-            "max_pct_in_single_fund": 0.0,
-        })
-        fund = exposure.get("matched_name") or exposure.get("scheme_name")
-        if fund and fund not in target["funds"]:
-            target["funds"].append(fund)
-        target["aggregate_portfolio_exposure_percent"] += float(exposure.get("portfolio_weighted_pct") or 0)
-        target["aggregate_weighted_market_value"] += float(exposure.get("weighted_market_value") or 0)
-        target["max_pct_in_single_fund"] = max(
-            target["max_pct_in_single_fund"],
-            float(exposure.get("pct_of_fund_assets") or 0),
-        )
-
-    rows = []
-    for row in grouped.values():
-        row["fund_count"] = len(row["funds"])
-        if not overlap_only or row["fund_count"] >= 2:
-            row["aggregate_portfolio_exposure_percent"] = round(row["aggregate_portfolio_exposure_percent"], 4)
-            row["aggregate_weighted_market_value"] = round(row["aggregate_weighted_market_value"], 2)
-            rows.append(row)
-    rows.sort(key=lambda row: row["aggregate_portfolio_exposure_percent"], reverse=True)
-    return rows
+    _, denominator, _ = _exposure_scope(context, holder_names)
+    return analytics.stock_overlap_rows(
+        exposure_rows,
+        denominator,
+        min_fund_count=2 if overlap_only else 1,
+    )
 
 
 def _table(
@@ -493,6 +464,7 @@ def _table(
     row_key_fields: list[str] | None = None,
     rows_complete: bool | None = None,
     nested_fields: dict[str, dict[str, object]] | None = None,
+    exposure: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "id": table_id,
@@ -508,6 +480,7 @@ def _table(
         "row_key_fields": row_key_fields or [],
         "rows_complete": rows_complete if rows_complete is not None else len(rows) >= (total_rows or len(rows)),
         "nested_fields": nested_fields or {},
+        "exposure": exposure,
     }
 
 
@@ -813,6 +786,35 @@ def _requested_holder_names(context: dict[str, Any], normalized: str) -> list[st
     if isinstance(requested, list):
         return [holder for holder in requested if holder in holders]
     return []
+
+
+def _exposure_scope(
+    context: dict[str, Any],
+    holder_names: list[str],
+) -> tuple[list[dict[str, Any]], float, dict[str, Any]]:
+    exposure_rows = list((context.get("fund_stock_holdings") or {}).get("rows") or [])
+    holder_rows = list((context.get("holder_returns") or {}).get("rows") or [])
+    if holder_names:
+        exposure_rows = [row for row in exposure_rows if row.get("holder_name") in holder_names]
+        denominator = sum(
+            float(row.get("current_value") or 0)
+            for row in holder_rows
+            if row.get("holder_name") in holder_names
+        )
+        scope = "holder" if len(holder_names) == 1 else "selected_holders"
+    else:
+        totals = (context.get("holder_returns") or {}).get("totals") or {}
+        denominator = float(totals.get("current_value") or 0)
+        if not denominator:
+            denominator = sum(float(row.get("current_value") or 0) for row in holder_rows)
+        scope = "family"
+    metadata = analytics.exposure_metadata(
+        denominator,
+        exposure_rows,
+        scope=scope,
+        holder_names=holder_names,
+    )
+    return exposure_rows, denominator, metadata
 
 
 def _find_named_row_value(

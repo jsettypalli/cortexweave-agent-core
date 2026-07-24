@@ -1,7 +1,7 @@
 from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
 import re
-from typing import Iterable
+from typing import Any, Iterable
 
 from cortexweave_core.rag.pipelines.portfolio.models import PortfolioReport
 from cortexweave_core.rag.pipelines.portfolio.mutual_fund_value_extractor import extract_mutual_fund_values
@@ -171,8 +171,57 @@ def fund_stock_holdings(reports: list[PortfolioReport]) -> dict:
     return {"rows": rows, "totals": _totals(rows, invested_key="weighted_market_value")}
 
 
-def stock_overlap(reports: list[PortfolioReport], min_fund_count: int = 2) -> dict:
-    rows = fund_stock_holdings(reports)["rows"]
+def portfolio_total_value(reports: list[PortfolioReport]) -> float:
+    total = 0.0
+    for report in reports:
+        grand_total = next(
+            (row for row in report.asset_allocations if row.asset_class == "Grand Total"),
+            None,
+        )
+        if grand_total and grand_total.current_value is not None:
+            total += float(grand_total.current_value)
+    if total:
+        return total
+    return sum(
+        float(holding.market_value or 0)
+        for report in reports
+        for holding in report.mutual_fund_holdings
+    )
+
+
+def exposure_metadata(
+    denominator: float,
+    exposure_rows: list[dict[str, Any]],
+    *,
+    scope: str = "family",
+    holder_names: list[str] | None = None,
+) -> dict[str, Any]:
+    enriched_value = sum(float(row.get("weighted_market_value") or 0) for row in exposure_rows)
+    coverage = enriched_value / denominator * 100 if denominator else 0.0
+    if 100 < coverage < 100.01:
+        coverage = 100.0
+    return {
+        "basis": "total_assets",
+        "scope": scope,
+        "holder_names": holder_names or [],
+        "denominator": round(denominator, 2),
+        "enriched_weighted_value": round(enriched_value, 2),
+        "coverage_percent": round(coverage, 2),
+    }
+
+
+def _exposure_percent(weighted_value: float, denominator: float, legacy_percent: float) -> float:
+    if denominator:
+        return weighted_value / denominator * 100
+    return legacy_percent
+
+
+def stock_overlap_rows(
+    rows: list[dict[str, Any]],
+    denominator: float,
+    *,
+    min_fund_count: int = 2,
+) -> list[dict[str, Any]]:
     grouped: dict[str, dict] = {}
     for row in rows:
         stock = row.get("stock_name")
@@ -186,11 +235,12 @@ def stock_overlap(reports: list[PortfolioReport], min_fund_count: int = 2) -> di
             "aggregate_portfolio_exposure_percent": 0.0,
             "aggregate_weighted_market_value": 0.0,
             "max_pct_in_single_fund": 0.0,
+            "_legacy_exposure_percent": 0.0,
         })
         fund_label = row.get("matched_name") or row.get("scheme_name")
         if fund_label and fund_label not in target["funds"]:
             target["funds"].append(fund_label)
-        target["aggregate_portfolio_exposure_percent"] += float(row.get("portfolio_weighted_pct") or 0)
+        target["_legacy_exposure_percent"] += float(row.get("portfolio_weighted_pct") or 0)
         target["aggregate_weighted_market_value"] += float(row.get("weighted_market_value") or 0)
         target["max_pct_in_single_fund"] = max(
             target["max_pct_in_single_fund"],
@@ -200,15 +250,29 @@ def stock_overlap(reports: list[PortfolioReport], min_fund_count: int = 2) -> di
     for row in grouped.values():
         row["fund_count"] = len(row["funds"])
         if row["fund_count"] >= min_fund_count:
-            row["aggregate_portfolio_exposure_percent"] = round(row["aggregate_portfolio_exposure_percent"], 4)
+            row["aggregate_portfolio_exposure_percent"] = round(_exposure_percent(
+                row["aggregate_weighted_market_value"],
+                denominator,
+                row.pop("_legacy_exposure_percent"),
+            ), 4)
             row["aggregate_weighted_market_value"] = round(row["aggregate_weighted_market_value"], 2)
             output.append(row)
     output.sort(key=lambda row: row["aggregate_portfolio_exposure_percent"], reverse=True)
-    return {"rows": output, "totals": {"overlap_count": len(output)}}
+    return output
 
 
-def sector_overlap(reports: list[PortfolioReport]) -> dict:
-    rows = fund_stock_holdings(reports)["rows"]
+def stock_overlap(reports: list[PortfolioReport], min_fund_count: int = 2) -> dict:
+    exposure_rows = fund_stock_holdings(reports)["rows"]
+    denominator = portfolio_total_value(reports)
+    output = stock_overlap_rows(exposure_rows, denominator, min_fund_count=min_fund_count)
+    return {
+        "rows": output,
+        "totals": {"overlap_count": len(output)},
+        "exposure": exposure_metadata(denominator, exposure_rows),
+    }
+
+
+def sector_overlap_rows(rows: list[dict[str, Any]], denominator: float) -> list[dict[str, Any]]:
     grouped: dict[str, dict] = {}
     for row in rows:
         sector = row.get("sector") or "Unclassified"
@@ -217,11 +281,12 @@ def sector_overlap(reports: list[PortfolioReport]) -> dict:
             "funds": {},
             "aggregate_portfolio_exposure_percent": 0.0,
             "aggregate_weighted_market_value": 0.0,
+            "_legacy_exposure_percent": 0.0,
         })
         fund_label = row.get("matched_name") or row.get("scheme_name")
         if fund_label:
-            target["funds"][fund_label] = target["funds"].get(fund_label, 0.0) + float(row.get("portfolio_weighted_pct") or 0)
-        target["aggregate_portfolio_exposure_percent"] += float(row.get("portfolio_weighted_pct") or 0)
+            target["funds"][fund_label] = target["funds"].get(fund_label, 0.0) + float(row.get("weighted_market_value") or 0)
+        target["_legacy_exposure_percent"] += float(row.get("portfolio_weighted_pct") or 0)
         target["aggregate_weighted_market_value"] += float(row.get("weighted_market_value") or 0)
     output = []
     for row in grouped.values():
@@ -229,29 +294,46 @@ def sector_overlap(reports: list[PortfolioReport]) -> dict:
         output.append({
             "sector": row["sector"],
             "fund_count": len(row["funds"]),
-            "aggregate_portfolio_exposure_percent": round(row["aggregate_portfolio_exposure_percent"], 4),
+            "aggregate_portfolio_exposure_percent": round(_exposure_percent(
+                row["aggregate_weighted_market_value"],
+                denominator,
+                row["_legacy_exposure_percent"],
+            ), 4),
             "aggregate_weighted_market_value": round(row["aggregate_weighted_market_value"], 2),
             "top_contributing_funds": [name for name, _ in top],
         })
     output.sort(key=lambda row: row["aggregate_portfolio_exposure_percent"], reverse=True)
-    return {"rows": output, "totals": {"sector_count": len(output)}}
+    return output
 
 
-def fund_overlap_matrix(reports: list[PortfolioReport]) -> dict:
+def sector_overlap(reports: list[PortfolioReport]) -> dict:
+    exposure_rows = fund_stock_holdings(reports)["rows"]
+    denominator = portfolio_total_value(reports)
+    output = sector_overlap_rows(exposure_rows, denominator)
+    return {
+        "rows": output,
+        "totals": {"sector_count": len(output)},
+        "exposure": exposure_metadata(denominator, exposure_rows),
+    }
+
+
+def fund_overlap_rows(rows: list[dict[str, Any]], denominator: float) -> list[dict[str, Any]]:
     by_fund: dict[str, dict[str, dict]] = defaultdict(dict)
-    for row in fund_stock_holdings(reports)["rows"]:
+    for row in rows:
         fund = row.get("matched_name") or row.get("scheme_name")
         stock = row.get("stock_name")
         if fund and stock:
             target = by_fund[str(fund)].setdefault(str(stock), {
                 "name": str(stock),
-                "combined_portfolio_exposure_percent": 0.0,
+                "legacy_portfolio_exposure_percent": 0.0,
                 "combined_fund_allocation_percent": 0.0,
                 "combined_weighted_market_value": 0.0,
+                "combined_fund_current_value": 0.0,
             })
-            target["combined_portfolio_exposure_percent"] += float(row.get("portfolio_weighted_pct") or 0)
+            target["legacy_portfolio_exposure_percent"] += float(row.get("portfolio_weighted_pct") or 0)
             target["combined_fund_allocation_percent"] += float(row.get("pct_of_fund_assets") or 0)
             target["combined_weighted_market_value"] += float(row.get("weighted_market_value") or 0)
+            target["combined_fund_current_value"] += float(row.get("fund_current_value") or 0)
     funds = sorted(by_fund)
     rows = []
     for i, fund_a in enumerate(funds):
@@ -263,20 +345,32 @@ def fund_overlap_matrix(reports: list[PortfolioReport]) -> dict:
             for stock in shared_names:
                 fund_a_metrics = by_fund[fund_a][stock]
                 fund_b_metrics = by_fund[fund_b][stock]
+                combined_value = (
+                    fund_a_metrics["combined_weighted_market_value"]
+                    + fund_b_metrics["combined_weighted_market_value"]
+                )
+                legacy_exposure = (
+                    fund_a_metrics["legacy_portfolio_exposure_percent"]
+                    + fund_b_metrics["legacy_portfolio_exposure_percent"]
+                )
+                fund_a_allocation = _exposure_percent(
+                    fund_a_metrics["combined_weighted_market_value"],
+                    fund_a_metrics["combined_fund_current_value"],
+                    fund_a_metrics["combined_fund_allocation_percent"],
+                )
+                fund_b_allocation = _exposure_percent(
+                    fund_b_metrics["combined_weighted_market_value"],
+                    fund_b_metrics["combined_fund_current_value"],
+                    fund_b_metrics["combined_fund_allocation_percent"],
+                )
                 shared.append({
                     "name": stock,
                     "combined_portfolio_exposure_percent": round(
-                        fund_a_metrics["combined_portfolio_exposure_percent"] + fund_b_metrics["combined_portfolio_exposure_percent"],
+                        _exposure_percent(combined_value, denominator, legacy_exposure),
                         4,
                     ),
-                    "combined_fund_allocation_percent": round(
-                        fund_a_metrics["combined_fund_allocation_percent"] + fund_b_metrics["combined_fund_allocation_percent"],
-                        4,
-                    ),
-                    "combined_weighted_market_value": round(
-                        fund_a_metrics["combined_weighted_market_value"] + fund_b_metrics["combined_weighted_market_value"],
-                        2,
-                    ),
+                    "combined_fund_allocation_percent": round(fund_a_allocation + fund_b_allocation, 4),
+                    "combined_weighted_market_value": round(combined_value, 2),
                 })
             shared.sort(key=lambda item: (item["combined_portfolio_exposure_percent"], item["combined_weighted_market_value"]), reverse=True)
             rows.append({
@@ -288,7 +382,18 @@ def fund_overlap_matrix(reports: list[PortfolioReport]) -> dict:
                 "stocks": shared,
             })
     rows.sort(key=lambda row: (row["shared_portfolio_exposure_percent"], row["shared_stocks"]), reverse=True)
-    return {"rows": rows, "totals": {"pairs_with_overlap": len(rows)}}
+    return rows
+
+
+def fund_overlap_matrix(reports: list[PortfolioReport]) -> dict:
+    exposure_rows = fund_stock_holdings(reports)["rows"]
+    denominator = portfolio_total_value(reports)
+    rows = fund_overlap_rows(exposure_rows, denominator)
+    return {
+        "rows": rows,
+        "totals": {"pairs_with_overlap": len(rows)},
+        "exposure": exposure_metadata(denominator, exposure_rows),
+    }
 
 
 def _sub_asset_holding_periods_by_allocation(report: PortfolioReport) -> dict:

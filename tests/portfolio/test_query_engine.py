@@ -1,4 +1,5 @@
 from cortexweave_core.rag.pipelines.portfolio.executor import execute_portfolio_plan
+from cortexweave_core.rag.pipelines.portfolio import analytics
 from cortexweave_core.rag.pipelines.portfolio.planner import (
     build_portfolio_query_plan,
     portfolio_schema_from_context,
@@ -15,6 +16,41 @@ from cortexweave_core.rag.pipelines.portfolio.query_engine import (
 def _execute(question: str, context: dict):
     plan = build_portfolio_query_plan(question, portfolio_schema_from_context(context))
     return plan, execute_portfolio_plan(plan, context)
+
+
+def test_overlap_exposures_use_weighted_value_and_scope_denominator():
+    exposures = [
+        {
+            "holder_name": "Small Holder",
+            "matched_name": "Fund A",
+            "stock_name": "Shared Stock",
+            "sector": "Financial",
+            "portfolio_weighted_pct": 50,
+            "weighted_market_value": 50,
+            "fund_current_value": 100,
+            "pct_of_fund_assets": 50,
+        },
+        {
+            "holder_name": "Large Holder",
+            "matched_name": "Fund B",
+            "stock_name": "Shared Stock",
+            "sector": "Financial",
+            "portfolio_weighted_pct": 10,
+            "weighted_market_value": 900,
+            "fund_current_value": 9000,
+            "pct_of_fund_assets": 10,
+        },
+    ]
+
+    sector = analytics.sector_overlap_rows(exposures, 10000)[0]
+    stock = analytics.stock_overlap_rows(exposures, 10000)[0]
+    fund_pair = analytics.fund_overlap_rows(exposures, 10000)[0]
+
+    assert sector["aggregate_portfolio_exposure_percent"] == 9.5
+    assert sector["top_contributing_funds"] == ["Fund B", "Fund A"]
+    assert stock["aggregate_portfolio_exposure_percent"] == 9.5
+    assert fund_pair["shared_portfolio_exposure_percent"] == 9.5
+    assert analytics.exposure_metadata(10000, exposures)["coverage_percent"] == 9.5
 
 
 def test_stock_overlap_understands_more_than_one_fund_holder_and_top_limit():
@@ -246,6 +282,52 @@ def test_fund_overlap_respects_top_limit():
     assert table["query_ref"] is None
 
 
+def test_fund_overlap_by_underlying_stocks_excludes_non_equity_instruments():
+    exposure_rows = [
+        {
+            "matched_name": fund,
+            "stock_name": "Shared Equity",
+            "nature": "EQUITY",
+            "weighted_market_value": value,
+            "fund_current_value": 1000,
+            "pct_of_fund_assets": value / 10,
+        }
+        for fund, value in (("Fund A", 100), ("Fund B", 200))
+    ] + [
+        {
+            "matched_name": fund,
+            "stock_name": "Cash Margin",
+            "nature": "CASH",
+            "weighted_market_value": 5000,
+            "fund_current_value": 1000,
+            "pct_of_fund_assets": 500,
+        }
+        for fund in ("Fund A", "Fund B", "Fund C")
+    ]
+
+    result = _enrichment_answer(
+        "Show top 10 fund overlap by underlying stocks, sorted by highest portfolio exposure.",
+        {
+            "fund_resolution_status": {"rows": []},
+            "fund_stock_holdings": {"rows": exposure_rows},
+            "fund_overlap_matrix": {"rows": [{
+                "fund_a": "Cached Mixed Fund A",
+                "fund_b": "Cached Mixed Fund B",
+                "shared_stocks": 1,
+                "shared_portfolio_exposure_percent": 999,
+                "stocks": [{"name": "Cash Margin"}],
+            }]},
+        },
+    )
+
+    table_rows = result["tables"][0]["rows"]
+    assert result["data"]["datasets"]["fund_overlap_matrix"]["total_rows"] == 1
+    assert len(table_rows) == 1
+    assert {table_rows[0]["fund_a"], table_rows[0]["fund_b"]} == {"Fund A", "Fund B"}
+    assert table_rows[0]["shared_stocks"] == 1
+    assert [stock["name"] for stock in table_rows[0]["stocks"]] == ["Shared Equity"]
+
+
 def test_fund_overlap_filters_to_requested_holder():
     fatema = "Ms. ROOWALLA FATEMA SULEMANJI"
     other = "Other Holder"
@@ -254,6 +336,7 @@ def test_fund_overlap_filters_to_requested_holder():
             "holder_name": fatema,
             "matched_name": fund,
             "stock_name": "Fatema Stock",
+            "nature": "EQUITY",
             "portfolio_weighted_pct": exposure,
             "weighted_market_value": exposure * 100,
             "pct_of_fund_assets": exposure * 2,
@@ -264,6 +347,7 @@ def test_fund_overlap_filters_to_requested_holder():
             "holder_name": other,
             "matched_name": fund,
             "stock_name": "Other Stock",
+            "nature": "EQUITY",
             "portfolio_weighted_pct": 100,
             "weighted_market_value": 10000,
             "pct_of_fund_assets": 50,
@@ -309,16 +393,22 @@ def test_requested_holder_name_prefers_sulemanji_over_shared_name_token():
 
     assert _requested_holder_names(context, "fund overlap for sulemanji") == [sulemanji]
     assert _requested_holder_names(context, "fund overlap for fatema") == [fatema]
+    assert _requested_holder_names(
+        context,
+        "large cap as part of total assets and equity asset for fatema roowalla",
+    ) == [fatema]
 
 
 def test_fund_overlap_understands_between_equity_mutual_funds():
     rows = [
-        {"scheme_name": "Equity Fund A", "asset_bucket": "Equity", "stock_name": "Stock 1"},
-        {"scheme_name": "Equity Fund A", "asset_bucket": "Equity", "stock_name": "Stock 2"},
-        {"scheme_name": "Equity Fund B", "asset_bucket": "Equity", "stock_name": "Stock 1"},
-        {"scheme_name": "Equity Fund C", "asset_bucket": "Equity", "stock_name": "Stock 2"},
-        {"scheme_name": "Debt Fund A", "asset_bucket": "Debt", "stock_name": "Stock 1"},
-        {"scheme_name": "Debt Fund A", "asset_bucket": "Debt", "stock_name": "Stock 2"},
+        {"scheme_name": "Equity Fund A", "asset_bucket": "Equity", "stock_name": "Stock 1", "nature": "EQUITY"},
+        {"scheme_name": "Equity Fund A", "asset_bucket": "Equity", "stock_name": "Stock 2", "nature": "EQUITY"},
+        {"scheme_name": "Equity Fund B", "asset_bucket": "Equity", "stock_name": "Stock 1", "nature": "EQUITY"},
+        {"scheme_name": "Equity Fund C", "asset_bucket": "Equity", "stock_name": "Stock 2", "nature": "EQUITY"},
+        {"scheme_name": "Equity Fund B", "asset_bucket": "Equity", "stock_name": "Cash Margin", "nature": "CASH"},
+        {"scheme_name": "Equity Fund C", "asset_bucket": "Equity", "stock_name": "Cash Margin", "nature": "CASH"},
+        {"scheme_name": "Debt Fund A", "asset_bucket": "Debt", "stock_name": "Stock 1", "nature": "EQUITY"},
+        {"scheme_name": "Debt Fund A", "asset_bucket": "Debt", "stock_name": "Stock 2", "nature": "EQUITY"},
     ]
 
     result = _enrichment_answer(
@@ -336,6 +426,22 @@ def test_fund_overlap_understands_between_equity_mutual_funds():
     assert len(table["rows"]) == 2
     assert table["query_ref"] is None
     assert all("Debt Fund A" not in {row["fund_a"], row["fund_b"]} for row in table["rows"])
+    assert all(
+        stock["name"] != "Cash Margin"
+        for row in table["rows"]
+        for stock in row["stocks"]
+    )
+
+    all_holdings_result = _enrichment_answer(
+        "Compare fund overlap across all holdings between my equity mutual funds.",
+        {
+            "fund_resolution_status": {"rows": []},
+            "fund_stock_holdings": {"rows": rows},
+            "fund_overlap_matrix": {"rows": []},
+        },
+    )
+
+    assert all_holdings_result["data"]["datasets"]["fund_overlap_matrix"]["total_rows"] == 3
 
 
 def test_highest_and_lowest_xirr_route_to_mutual_fund_holdings():

@@ -150,7 +150,10 @@ def build_portfolio_query_plan(question: str, schema: dict[str, Any]) -> Portfol
         filters.pop("holder_name", None)
         datasets = ["holder_returns"]
         group_by = []
-    if _asks_for_family_total_assets(normalized):
+    if _asks_for_family_total_assets(normalized) and (
+        "holder_name" not in filters
+        or any(term in normalized for term in ("family", "household"))
+    ):
         filters.pop("holder_name", None)
         datasets = ["holder_returns"]
         group_by = []
