@@ -1,5 +1,9 @@
 import asyncio
+import copy
+import json
 from collections.abc import Callable
+
+from google.adk.tools.tool_context import ToolContext
 
 from cortexweave_core.rag.db import get_session
 from cortexweave_core.rag.pipelines.documents.dao import KnowledgeBaseDAO
@@ -15,6 +19,34 @@ DEFAULT_DIRECT_TOOL_ROW_LIMIT = 10
 MAX_DIRECT_TOOL_ROW_LIMIT = 100
 DEFAULT_DIRECT_TOOL_NESTED_LIMIT = 10
 MAX_DIRECT_TOOL_NESTED_LIMIT = 25
+
+
+def _configured_int(key: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(config.get(key) or default)
+    except (TypeError, ValueError):
+        return default
+    return min(max(value, minimum), maximum)
+
+
+DEFAULT_AGENT_TABLE_ROW_LIMIT = _configured_int(
+    "PORTFOLIO_AGENT_TABLE_ROW_LIMIT",
+    10,
+    minimum=1,
+    maximum=100,
+)
+DEFAULT_AGENT_TABLE_NESTED_LIMIT = _configured_int(
+    "PORTFOLIO_AGENT_TABLE_NESTED_LIMIT",
+    3,
+    minimum=0,
+    maximum=25,
+)
+MAX_AGENT_TABLE_PAYLOAD_BYTES = _configured_int(
+    "PORTFOLIO_AGENT_TABLE_MAX_BYTES",
+    64 * 1024,
+    minimum=4 * 1024,
+    maximum=1024 * 1024,
+)
 
 
 def _config_or_raise(key: str) -> str:
@@ -128,7 +160,114 @@ def _compact_stock_overlap_result(
     return {"rows": compact_rows, "totals": totals, "warnings": warnings}
 
 
-async def answer_portfolio_query(question: str) -> dict:
+def _json_size(value: object) -> int:
+    return len(json.dumps(value, separators=(",", ":"), default=str).encode("utf-8"))
+
+
+def _compact_agent_table(
+    table: dict,
+    *,
+    row_limit: int = DEFAULT_AGENT_TABLE_ROW_LIMIT,
+    nested_limit: int = DEFAULT_AGENT_TABLE_NESTED_LIMIT,
+) -> dict:
+    compact = copy.deepcopy(table)
+    all_rows = list(compact.get("rows") or [])
+    total_rows = max(int(compact.get("total_rows") or 0), len(all_rows))
+    rows = all_rows[:row_limit]
+    list_fields = [
+        str(column.get("key"))
+        for column in compact.get("columns") or []
+        if isinstance(column, dict) and column.get("type") == "list" and column.get("key")
+    ]
+    declared_nested_fields = compact.get("nested_fields") or {}
+    nested_fields: dict[str, dict[str, object]] = {}
+
+    for field in list_fields:
+        declared = declared_nested_fields.get(field) if isinstance(declared_nested_fields, dict) else None
+        field_limit = (
+            max(0, int(declared.get("initial_limit")))
+            if isinstance(declared, dict) and declared.get("initial_limit") is not None
+            else nested_limit
+        )
+        field_complete = True
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            values = row.get(field)
+            if not isinstance(values, list):
+                continue
+            nested_counts = dict(row.get("_nested_counts") or {})
+            nested_counts[field] = len(values)
+            row["_nested_counts"] = nested_counts
+            total_key = declared.get("total_key") if isinstance(declared, dict) else None
+            if isinstance(total_key, str) and total_key and row.get(total_key) is None:
+                row[total_key] = len(values)
+            if len(values) > field_limit:
+                row[field] = values[:field_limit]
+                field_complete = False
+        nested_fields[field] = {
+            **(declared if isinstance(declared, dict) else {}),
+            "complete": field_complete,
+            "initial_limit": field_limit,
+        }
+
+    compact["rows"] = rows
+    compact["total_rows"] = total_rows
+    declared_rows_complete = compact.get("rows_complete")
+    compact["rows_complete"] = (
+        bool(declared_rows_complete)
+        if len(rows) == len(all_rows) and declared_rows_complete is not None
+        else total_rows <= len(rows)
+    )
+    compact["nested_fields"] = nested_fields
+    query_ref = compact.get("query_ref")
+    if isinstance(query_ref, dict) and isinstance(query_ref.get("text"), str):
+        query_ref["text"] = query_ref["text"][:2048]
+    if len(rows) < total_rows or any(not item["complete"] for item in nested_fields.values()):
+        warning = "Additional table details load when the table or row is opened."
+        warnings = list(compact.get("warnings") or [])
+        if compact.get("id") == "fund_overlap_matrix":
+            warnings = [
+                item
+                for item in warnings
+                if not str(item).startswith("Shared stock lists are capped to top ")
+            ]
+        if warning not in warnings:
+            warnings.append(warning)
+        compact["warnings"] = warnings
+    return compact
+
+
+def _compact_agent_table_result(result: dict) -> dict:
+    tables = [
+        _compact_agent_table(table)
+        for table in result.get("tables") or []
+        if isinstance(table, dict)
+    ]
+    compact = {
+        "answer": str(result.get("answer") or "")[:2000],
+        "intent": str(result.get("intent") or "portfolio_query"),
+        "data": {},
+        "sources": [],
+        "warnings": list(result.get("warnings") or []),
+        "tables": tables,
+    }
+
+    while _json_size(compact) > MAX_AGENT_TABLE_PAYLOAD_BYTES:
+        candidates = [
+            table for table in tables
+            if isinstance(table.get("rows"), list) and table["rows"]
+        ]
+        if not candidates:
+            break
+        largest = max(candidates, key=lambda table: _json_size(table.get("rows")))
+        largest["rows"] = largest["rows"][:-1]
+        largest["rows_complete"] = False
+
+    return compact
+
+
+async def answer_portfolio_query(question: str, tool_context: ToolContext) -> dict:
     """
     Answers portfolio questions using the deterministic portfolio query engine.
 
@@ -137,11 +276,15 @@ async def answer_portfolio_query(question: str) -> dict:
     from chat history; the query engine handles planning, filtering, sorting,
     grouping, and ranking.
 
-    If the returned dict contains `tables`, return the complete dict to the user
-    as raw JSON only. Do not convert portfolio tables to Markdown; the UI renders
-    structured tables in a modal.
+    Structured table results are emitted directly to the UI as the final tool
+    response. They are compacted to one canonical table representation and are
+    not sent back to the model for summarization.
     """
-    return await _answer_portfolio_query(question)
+    result = await _answer_portfolio_query(question)
+    if result.get("tables"):
+        tool_context.actions.skip_summarization = True
+        return _compact_agent_table_result(result)
+    return result
 
 
 def _normalize_text(value: str | None) -> str:

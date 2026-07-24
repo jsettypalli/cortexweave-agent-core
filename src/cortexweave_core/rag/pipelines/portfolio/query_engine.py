@@ -147,6 +147,10 @@ def _enrichment_answer(
                 ],
                 issues,
                 actions=["resolve_match"],
+                query_ref=_query_ref(question, knowledge_base_name, family_id),
+                row_key_fields=["resolution_id"],
+                rows_complete=True,
+                nested_fields={"candidates": {"initial_limit": 3, "total_key": "candidate_count"}},
             )],
         }
     if any(term in normalized for term in ("sector", "industry", "concentration")) and any(term in normalized for term in ("overlap", "exposure", "concentration", "duplicated", "duplicate")):
@@ -171,24 +175,39 @@ def _enrichment_answer(
                 rows,
                 default_sort={"key": "aggregate_portfolio_exposure_percent", "direction": "desc"},
                 actions=["csv_export"],
+                query_ref=_query_ref(question, knowledge_base_name, family_id),
+                row_key_fields=["sector"],
+                rows_complete=True,
+                nested_fields={"top_contributing_funds": {"initial_limit": 5}},
             )],
         }
     if _asks_for_fund_overlap(normalized):
+        requested_holders = _requested_holder_names(context, normalized)
         equity_only = _asks_for_equity_funds(normalized)
-        all_rows = _fund_overlap_rows(context, equity_only=equity_only)
+        all_rows = _fund_overlap_rows(
+            context,
+            requested_holders,
+            equity_only=equity_only,
+        )
         requested_limit = _requested_limit(normalized)
         row_limit = requested_limit or DEFAULT_OVERLAP_ROWS
         rows = all_rows[:row_limit]
         response_rows = _compact_fund_overlap_rows(rows)
         fund_scope = "equity mutual fund" if equity_only else "fund"
+        holder_label = f" for {', '.join(requested_holders)}" if requested_holders else ""
         return {
             "answer": _limited_overlap_answer(
                 len(all_rows),
-                f"{fund_scope} pair(s) with shared underlying stocks",
+                f"{fund_scope} pair(s) with shared underlying stocks{holder_label}",
                 response_rows,
             ),
             "intent": "fund_overlap_matrix",
-            "data": {"datasets": {"fund_overlap_matrix": {"rows": response_rows, "matched_rows": len(response_rows), "total_rows": len(all_rows)}}},
+            "data": {"datasets": {"fund_overlap_matrix": {
+                "rows": response_rows,
+                "matched_rows": len(response_rows),
+                "total_rows": len(all_rows),
+                "holder_names": requested_holders,
+            }}},
             "warnings": _enrichment_warnings((context.get("fund_resolution_status") or {}).get("rows") or []),
             "tables": [_table(
                 "fund_overlap_matrix",
@@ -208,6 +227,9 @@ def _enrichment_answer(
                 warnings=_fund_overlap_warnings(len(all_rows), len(rows), requested_limit is None),
                 total_rows=len(all_rows),
                 query_ref=_query_ref(question, knowledge_base_name, family_id),
+                row_key_fields=["fund_a", "fund_b"],
+                rows_complete=requested_limit is not None or len(rows) >= len(all_rows),
+                nested_fields={"stocks": {"initial_limit": 0, "total_key": "shared_stocks"}},
             )],
         }
     if _asks_for_security_exposure(normalized):
@@ -262,7 +284,10 @@ def _enrichment_answer(
                     else _limit_warnings(len(all_rows), len(rows))
                 ),
                 total_rows=len(all_rows),
-                query_ref=_query_ref(question, knowledge_base_name, family_id) if can_load_full_table else None,
+                query_ref=_query_ref(question, knowledge_base_name, family_id),
+                row_key_fields=["stock_name"],
+                rows_complete=requested_limit is not None or len(rows) >= len(all_rows),
+                nested_fields={"funds": {"initial_limit": 3, "total_key": "fund_count"}},
             )],
         }
     return None
@@ -288,14 +313,20 @@ def _asks_for_equity_funds(normalized: str) -> bool:
     return "equity" in normalized and any(term in normalized for term in ("fund", "funds", "mutual fund", "mutual funds"))
 
 
-def _fund_overlap_rows(context: dict[str, Any], equity_only: bool = False) -> list[dict[str, Any]]:
-    if not equity_only:
+def _fund_overlap_rows(
+    context: dict[str, Any],
+    holder_names: list[str] | None = None,
+    equity_only: bool = False,
+) -> list[dict[str, Any]]:
+    if not equity_only and not holder_names:
         return (context.get("fund_overlap_matrix") or {}).get("rows") or []
 
     exposure_rows = (context.get("fund_stock_holdings") or {}).get("rows") or []
     by_fund: dict[str, dict[str, dict[str, Any]]] = {}
     for row in exposure_rows:
-        if row.get("asset_bucket") != "Equity":
+        if holder_names and row.get("holder_name") not in holder_names:
+            continue
+        if equity_only and row.get("asset_bucket") != "Equity":
             continue
         fund = row.get("matched_name") or row.get("scheme_name")
         stock = row.get("stock_name")
@@ -459,6 +490,9 @@ def _table(
     warnings: list[str] | None = None,
     total_rows: int | None = None,
     query_ref: dict[str, str] | None = None,
+    row_key_fields: list[str] | None = None,
+    rows_complete: bool | None = None,
+    nested_fields: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, Any]:
     return {
         "id": table_id,
@@ -471,6 +505,9 @@ def _table(
         "warnings": warnings or [],
         "total_rows": total_rows if total_rows is not None else len(rows),
         "query_ref": query_ref,
+        "row_key_fields": row_key_fields or [],
+        "rows_complete": rows_complete if rows_complete is not None else len(rows) >= (total_rows or len(rows)),
+        "nested_fields": nested_fields or {},
     }
 
 
@@ -767,14 +804,15 @@ def _requested_parent_asset_class(
 def _requested_holder_names(context: dict[str, Any], normalized: str) -> list[str]:
     rows = (context.get("holder_returns") or {}).get("rows") or []
     holders = sorted({str(row.get("holder_name")) for row in rows if row.get("holder_name")})
-    return [holder for holder in holders if _holder_name_requested(holder, normalized)]
-
-
-def _holder_name_requested(holder_name: str, normalized: str) -> bool:
-    tokens = _simple_tokens(holder_name)
-    if not tokens:
-        return False
-    return any(token in _simple_tokens(normalized) for token in tokens if len(token) > 3)
+    if not holders:
+        return []
+    plan = build_portfolio_query_plan(normalized, {"holders": holders})
+    requested = plan.filters.get("holder_name")
+    if isinstance(requested, str):
+        return [requested]
+    if isinstance(requested, list):
+        return [holder for holder in requested if holder in holders]
+    return []
 
 
 def _find_named_row_value(

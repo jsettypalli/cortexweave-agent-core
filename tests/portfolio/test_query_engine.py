@@ -6,6 +6,7 @@ from cortexweave_core.rag.pipelines.portfolio.planner import (
 from cortexweave_core.rag.pipelines.portfolio.query_engine import (
     _asset_class_segregation_answer,
     _enrichment_answer,
+    _requested_holder_names,
     _sub_asset_parent_allocation_answer,
     _structured_fallback_answer,
 )
@@ -120,7 +121,8 @@ def test_stock_overlap_keeps_default_payload_capped_for_llm_usage():
     assert top_dataset["matched_rows"] == 25
     assert len(top_dataset["rows"]) == 25
     assert len(top_table["rows"]) == 25
-    assert top_table["query_ref"] is None
+    assert top_table["query_ref"] is not None
+    assert top_table["rows_complete"] is True
 
 
 def test_security_overlap_can_include_non_equity_holdings():
@@ -242,6 +244,71 @@ def test_fund_overlap_respects_top_limit():
         "Shared stock lists are capped to top 10 by portfolio exposure in this view.",
     ]
     assert table["query_ref"] is None
+
+
+def test_fund_overlap_filters_to_requested_holder():
+    fatema = "Ms. ROOWALLA FATEMA SULEMANJI"
+    other = "Other Holder"
+    exposure_rows = [
+        {
+            "holder_name": fatema,
+            "matched_name": fund,
+            "stock_name": "Fatema Stock",
+            "portfolio_weighted_pct": exposure,
+            "weighted_market_value": exposure * 100,
+            "pct_of_fund_assets": exposure * 2,
+        }
+        for fund, exposure in (("Fatema Fund A", 2), ("Fatema Fund B", 3))
+    ] + [
+        {
+            "holder_name": other,
+            "matched_name": fund,
+            "stock_name": "Other Stock",
+            "portfolio_weighted_pct": 100,
+            "weighted_market_value": 10000,
+            "pct_of_fund_assets": 50,
+        }
+        for fund in ("Other Fund A", "Other Fund B")
+    ]
+
+    result = _enrichment_answer(
+        "Show top 10 fund overlap by underlying stocks, sorted by highest portfolio exposure for Fatema?",
+        {
+            "fund_resolution_status": {"rows": []},
+            "fund_stock_holdings": {"rows": exposure_rows},
+            "holder_returns": {"rows": [
+                {"holder_name": fatema},
+                {"holder_name": other},
+            ]},
+            "fund_overlap_matrix": {"rows": [{
+                "fund_a": "Other Fund A",
+                "fund_b": "Other Fund B",
+                "shared_portfolio_exposure_percent": 200,
+                "stocks": [{"name": "Other Stock"}],
+            }]},
+        },
+    )
+
+    dataset = result["data"]["datasets"]["fund_overlap_matrix"]
+    assert dataset["holder_names"] == [fatema]
+    assert dataset["total_rows"] == 1
+    assert result["tables"][0]["rows"][0]["fund_a"] == "Fatema Fund A"
+    assert result["tables"][0]["rows"][0]["fund_b"] == "Fatema Fund B"
+    assert fatema in result["answer"]
+
+
+def test_requested_holder_name_prefers_sulemanji_over_shared_name_token():
+    sulemanji = "SULEMANJI M ROOWALA"
+    fatema = "Ms. ROOWALLA FATEMA SULEMANJI"
+    context = {
+        "holder_returns": {"rows": [
+            {"holder_name": sulemanji},
+            {"holder_name": fatema},
+        ]},
+    }
+
+    assert _requested_holder_names(context, "fund overlap for sulemanji") == [sulemanji]
+    assert _requested_holder_names(context, "fund overlap for fatema") == [fatema]
 
 
 def test_fund_overlap_understands_between_equity_mutual_funds():
