@@ -197,6 +197,51 @@ def test_security_overlap_can_include_non_equity_holdings():
     assert result["tables"][0]["rows"][0]["stock_name"] == "Repo"
 
 
+def test_debt_holding_overlap_filters_to_duplicated_debt_securities():
+    rows = [
+        {
+            "stock_name": "Government Bond 2035",
+            "sector": "Sovereign",
+            "nature": "DEBT",
+            "matched_name": fund,
+            "portfolio_weighted_pct": 2,
+            "weighted_market_value": 2000,
+            "pct_of_fund_assets": 5,
+        }
+        for fund in ("Debt Fund A", "Debt Fund B")
+    ]
+    rows.extend([
+        {
+            "stock_name": "Equity Stock",
+            "sector": "Financial",
+            "nature": "EQUITY",
+            "matched_name": fund,
+            "portfolio_weighted_pct": 20,
+            "weighted_market_value": 20000,
+            "pct_of_fund_assets": 10,
+        }
+        for fund in ("Equity Fund A", "Equity Fund B")
+    ])
+
+    result = _enrichment_answer(
+        "Show me top 10 overlapping debt holdings across my mutual funds.",
+        {
+            "fund_resolution_status": {"rows": []},
+            "fund_stock_holdings": {"rows": rows},
+            "holder_returns": {"rows": []},
+        },
+    )
+
+    dataset = result["data"]["datasets"]["stock_overlap"]
+    table = result["tables"][0]
+    assert result["intent"] == "stock_overlap"
+    assert dataset["nature"] == "DEBT"
+    assert dataset["total_rows"] == 1
+    assert dataset["rows"][0]["stock_name"] == "Government Bond 2035"
+    assert table["title"] == "Duplicated Debt Holding Exposure"
+    assert table["columns"][0]["label"] == "Debt Holding"
+
+
 def test_security_exposure_routes_combined_exposure_without_overlap_requirement():
     rows = [
         {
@@ -326,6 +371,117 @@ def test_fund_overlap_by_underlying_stocks_excludes_non_equity_instruments():
     assert {table_rows[0]["fund_a"], table_rows[0]["fund_b"]} == {"Fund A", "Fund B"}
     assert table_rows[0]["shared_stocks"] == 1
     assert [stock["name"] for stock in table_rows[0]["stocks"]] == ["Shared Equity"]
+
+
+def test_fund_overlap_by_underlying_debt_filters_instruments_and_fund_scope():
+    exposure_rows = [
+        {
+            "matched_name": "Equity Fund A",
+            "asset_bucket": "Equity",
+            "stock_name": "Shared Bond 1",
+            "nature": "DEBT",
+            "weighted_market_value": 100,
+        },
+        {
+            "matched_name": "Debt Fund B",
+            "asset_bucket": "Debt",
+            "stock_name": "Shared Bond 1",
+            "nature": "DEBT",
+            "weighted_market_value": 200,
+        },
+        {
+            "matched_name": "Debt Fund C",
+            "asset_bucket": "Debt",
+            "stock_name": "Shared Bond 2",
+            "nature": "DEBT",
+            "weighted_market_value": 300,
+        },
+        {
+            "matched_name": "Debt Fund D",
+            "asset_bucket": "Debt",
+            "stock_name": "Shared Bond 2",
+            "nature": "DEBT",
+            "weighted_market_value": 400,
+        },
+        {
+            "matched_name": "Equity Fund A",
+            "asset_bucket": "Equity",
+            "stock_name": "Shared Equity",
+            "nature": "EQUITY",
+            "weighted_market_value": 5000,
+        },
+        {
+            "matched_name": "Debt Fund B",
+            "asset_bucket": "Debt",
+            "stock_name": "Shared Equity",
+            "nature": "EQUITY",
+            "weighted_market_value": 5000,
+        },
+    ]
+    context = {
+        "fund_resolution_status": {"rows": []},
+        "fund_stock_holdings": {"rows": exposure_rows},
+        "fund_overlap_matrix": {"rows": []},
+    }
+
+    result = _enrichment_answer(
+        "Show top 10 fund overlap by underlying debt.",
+        context,
+    )
+
+    dataset = result["data"]["datasets"]["fund_overlap_matrix"]
+    table = result["tables"][0]
+    assert dataset["total_rows"] == 2
+    assert dataset["fund_asset_bucket"] is None
+    assert dataset["instrument_nature"] == "DEBT"
+    assert result["answer"] == "Found 2 fund pair(s) with shared underlying debt securities."
+    assert [column["label"] for column in table["columns"]][2:6] == [
+        "Shared Debt Securities",
+        "Shared Exposure",
+        "Shared Value",
+        "Debt Securities",
+    ]
+    assert all(
+        stock["name"].startswith("Shared Bond")
+        for row in table["rows"]
+        for stock in row["stocks"]
+    )
+    assert table["warnings"] == [
+        "Shared debt security lists are capped to top 10 by portfolio exposure in this view.",
+    ]
+
+    debt_funds_result = _enrichment_answer(
+        "Compare overlap between my debt mutual funds.",
+        context,
+    )
+    debt_dataset = debt_funds_result["data"]["datasets"]["fund_overlap_matrix"]
+    assert debt_dataset["total_rows"] == 1
+    assert debt_dataset["fund_asset_bucket"] == "Debt"
+    assert debt_dataset["instrument_nature"] == "DEBT"
+    assert {
+        debt_funds_result["tables"][0]["rows"][0]["fund_a"],
+        debt_funds_result["tables"][0]["rows"][0]["fund_b"],
+    } == {"Debt Fund C", "Debt Fund D"}
+
+    natural_wording_result = _enrichment_answer(
+        "Show me top 10 Debt overlaps in my Debt/Fixed Income funds",
+        context,
+    )
+    natural_dataset = natural_wording_result["data"]["datasets"]["fund_overlap_matrix"]
+    assert natural_wording_result["intent"] == "fund_overlap_matrix"
+    assert natural_dataset["total_rows"] == 1
+    assert natural_dataset["fund_asset_bucket"] == "Debt"
+    assert natural_dataset["instrument_nature"] == "DEBT"
+
+    plural_wording_result = _enrichment_answer(
+        "Show me top 10 funds overlaps by underlying debt",
+        context,
+    )
+    plural_dataset = plural_wording_result["data"]["datasets"]["fund_overlap_matrix"]
+    assert plural_wording_result["intent"] == "fund_overlap_matrix"
+    assert plural_dataset["total_rows"] == 2
+    assert plural_dataset["fund_asset_bucket"] is None
+    assert plural_dataset["instrument_nature"] == "DEBT"
 
 
 def test_fund_overlap_filters_to_requested_holder():
