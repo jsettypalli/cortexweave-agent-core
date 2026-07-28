@@ -216,6 +216,29 @@ def _exposure_percent(weighted_value: float, denominator: float, legacy_percent:
     return legacy_percent
 
 
+def _add_fund_allocation(
+    funds: list[dict[str, Any]],
+    fund_name: str,
+    pct_of_fund_assets: Any,
+) -> None:
+    allocation = (
+        float(pct_of_fund_assets)
+        if pct_of_fund_assets is not None
+        else None
+    )
+    existing = next((fund for fund in funds if fund["name"] == fund_name), None)
+    if existing is None:
+        funds.append({
+            "name": fund_name,
+            "pct_of_fund_assets": allocation,
+        })
+    elif allocation is not None and (
+        existing["pct_of_fund_assets"] is None
+        or allocation > existing["pct_of_fund_assets"]
+    ):
+        existing["pct_of_fund_assets"] = allocation
+
+
 def stock_overlap_rows(
     rows: list[dict[str, Any]],
     denominator: float,
@@ -238,8 +261,12 @@ def stock_overlap_rows(
             "_legacy_exposure_percent": 0.0,
         })
         fund_label = row.get("matched_name") or row.get("scheme_name")
-        if fund_label and fund_label not in target["funds"]:
-            target["funds"].append(fund_label)
+        if fund_label:
+            _add_fund_allocation(
+                target["funds"],
+                str(fund_label),
+                row.get("pct_of_fund_assets"),
+            )
         target["_legacy_exposure_percent"] += float(row.get("portfolio_weighted_pct") or 0)
         target["aggregate_weighted_market_value"] += float(row.get("weighted_market_value") or 0)
         target["max_pct_in_single_fund"] = max(

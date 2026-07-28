@@ -47,7 +47,13 @@ def test_direct_stock_overlap_tool_payload_is_compacted():
         "rows": [
             {
                 "stock_name": f"Stock {idx}",
-                "funds": [f"Fund {fund_idx}" for fund_idx in range(12)],
+                "funds": [
+                    {
+                        "name": f"Fund {fund_idx}",
+                        "pct_of_fund_assets": 10 - fund_idx / 10,
+                    }
+                    for fund_idx in range(12)
+                ],
             }
             for idx in range(15)
         ],
@@ -58,6 +64,10 @@ def test_direct_stock_overlap_tool_payload_is_compacted():
 
     assert len(compact["rows"]) == 10
     assert len(compact["rows"][0]["funds"]) == 10
+    assert compact["rows"][0]["funds"] == [
+        f"Fund {fund_idx}" for fund_idx in range(10)
+    ]
+    assert "pct_of_fund_assets" not in json.dumps(compact)
     assert compact["totals"]["total_rows"] == 15
     assert compact["totals"]["returned_rows"] == 10
     assert compact["totals"]["funds_returned_per_stock"] == 10

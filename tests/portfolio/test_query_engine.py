@@ -49,6 +49,10 @@ def test_overlap_exposures_use_weighted_value_and_scope_denominator():
     assert sector["aggregate_portfolio_exposure_percent"] == 9.5
     assert sector["top_contributing_funds"] == ["Fund B", "Fund A"]
     assert stock["aggregate_portfolio_exposure_percent"] == 9.5
+    assert stock["funds"] == [
+        {"name": "Fund A", "pct_of_fund_assets": 50.0},
+        {"name": "Fund B", "pct_of_fund_assets": 10.0},
+    ]
     assert fund_pair["shared_portfolio_exposure_percent"] == 9.5
     assert analytics.exposure_metadata(10000, exposures)["coverage_percent"] == 9.5
 
@@ -238,6 +242,10 @@ def test_debt_holding_overlap_filters_to_duplicated_debt_securities():
     assert dataset["nature"] == "DEBT"
     assert dataset["total_rows"] == 1
     assert dataset["rows"][0]["stock_name"] == "Government Bond 2035"
+    assert dataset["rows"][0]["funds"] == [
+        {"name": "Debt Fund A", "pct_of_fund_assets": 5.0},
+        {"name": "Debt Fund B", "pct_of_fund_assets": 5.0},
+    ]
     assert table["title"] == "Duplicated Debt Holding Exposure"
     assert table["columns"][0]["label"] == "Debt Holding"
 

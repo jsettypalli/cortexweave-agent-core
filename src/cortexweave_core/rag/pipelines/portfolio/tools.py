@@ -98,6 +98,16 @@ def _compact_sequence(values: object, limit: int) -> list:
     return values[:limit]
 
 
+def _compact_fund_names(values: object, limit: int) -> list:
+    compact = []
+    for value in _compact_sequence(values, limit):
+        if isinstance(value, dict) and value.get("name"):
+            compact.append(value["name"])
+        else:
+            compact.append(value)
+    return compact
+
+
 def _compact_fund_overlap_result(
     result: dict,
     *,
@@ -144,7 +154,9 @@ def _compact_stock_overlap_result(
     compact_rows = []
     for row in rows[:row_limit]:
         compact = dict(row)
-        compact["funds"] = _compact_sequence(compact.get("funds"), fund_limit)
+        # Direct tools are model-facing. Keep their overlap payload token-light;
+        # the richer fund allocation objects are reserved for UI table transport.
+        compact["funds"] = _compact_fund_names(compact.get("funds"), fund_limit)
         compact_rows.append(compact)
 
     totals = dict(result.get("totals") or {})
