@@ -563,6 +563,41 @@ def test_requested_holder_name_prefers_sulemanji_over_shared_name_token():
     ) == [fatema]
 
 
+def test_requested_holder_name_ignores_family_identifier():
+    context = {
+        "holder_returns": {"rows": [
+            {"holder_name": "SULEMANJI M ROOWALA", "current_value": 1000},
+            {"holder_name": "Ms. ROOWALLA FATEMA SULEMANJI", "current_value": 2000},
+        ]},
+        "fund_resolution_status": {"rows": []},
+        "fund_stock_holdings": {"rows": [
+            {
+                "holder_name": holder,
+                "matched_name": fund,
+                "stock_name": "Government Bond 2035",
+                "nature": "DEBT",
+                "portfolio_weighted_pct": 10,
+                "weighted_market_value": 100,
+                "pct_of_fund_assets": 5,
+            }
+            for holder, fund in (
+                ("SULEMANJI M ROOWALA", "Debt Fund A"),
+                ("Ms. ROOWALLA FATEMA SULEMANJI", "Debt Fund B"),
+            )
+        ]},
+    }
+    question = "show overlapping debt holdings in roowalla_family"
+
+    assert _requested_holder_names(
+        context,
+        question,
+        family_id="roowalla_family",
+    ) == []
+    result = _enrichment_answer(question, context, family_id="roowalla_family")
+    assert result["tables"][0]["exposure"]["scope"] == "family"
+    assert result["data"]["datasets"]["stock_overlap"]["holder_names"] == []
+
+
 def test_fund_overlap_understands_between_equity_mutual_funds():
     rows = [
         {"scheme_name": "Equity Fund A", "asset_bucket": "Equity", "stock_name": "Stock 1", "nature": "EQUITY"},

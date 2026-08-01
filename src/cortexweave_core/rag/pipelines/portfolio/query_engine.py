@@ -154,7 +154,7 @@ def _enrichment_answer(
             )],
         }
     if any(term in normalized for term in ("sector", "industry", "concentration")) and any(term in normalized for term in ("overlap", "exposure", "concentration", "duplicated", "duplicate")):
-        requested_holders = _requested_holder_names(context, normalized)
+        requested_holders = _requested_holder_names(context, normalized, family_id)
         exposure_rows, denominator, exposure = _exposure_scope(context, requested_holders)
         rows = (
             analytics.sector_overlap_rows(exposure_rows, denominator)
@@ -194,7 +194,7 @@ def _enrichment_answer(
             )],
         }
     if _asks_for_fund_overlap(normalized):
-        requested_holders = _requested_holder_names(context, normalized)
+        requested_holders = _requested_holder_names(context, normalized, family_id)
         _, _, exposure = _exposure_scope(context, requested_holders)
         fund_asset_bucket = _requested_overlap_fund_bucket(normalized)
         instrument_nature = _requested_overlap_instrument_nature(
@@ -261,7 +261,7 @@ def _enrichment_answer(
             )],
         }
     if _asks_for_security_exposure(normalized):
-        requested_holders = _requested_holder_names(context, normalized)
+        requested_holders = _requested_holder_names(context, normalized, family_id)
         _, _, exposure = _exposure_scope(context, requested_holders)
         security_nature = _requested_security_nature(normalized)
         overlap_only = _asks_for_stock_overlap(normalized)
@@ -873,18 +873,37 @@ def _requested_parent_asset_class(
     return None
 
 
-def _requested_holder_names(context: dict[str, Any], normalized: str) -> list[str]:
+def _requested_holder_names(
+    context: dict[str, Any],
+    normalized: str,
+    family_id: str | None = None,
+) -> list[str]:
     rows = (context.get("holder_returns") or {}).get("rows") or []
     holders = sorted({str(row.get("holder_name")) for row in rows if row.get("holder_name")})
     if not holders:
         return []
-    plan = build_portfolio_query_plan(normalized, {"holders": holders})
+    holder_question = _without_family_identifier(normalized, family_id)
+    plan = build_portfolio_query_plan(holder_question, {"holders": holders})
     requested = plan.filters.get("holder_name")
     if isinstance(requested, str):
         return [requested]
     if isinstance(requested, list):
         return [holder for holder in requested if holder in holders]
     return []
+
+
+def _without_family_identifier(question: str, family_id: str | None) -> str:
+    if not family_id:
+        return question
+    normalized_family_id = re.sub(r"[^a-z0-9]+", " ", family_id.lower()).strip()
+    normalized_question = re.sub(r"[^a-z0-9]+", " ", question.lower()).strip()
+    if not normalized_family_id:
+        return normalized_question
+    return re.sub(
+        rf"\b{re.escape(normalized_family_id)}\b",
+        " ",
+        normalized_question,
+    ).strip()
 
 
 def _exposure_scope(
